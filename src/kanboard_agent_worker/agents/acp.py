@@ -89,7 +89,7 @@ class AcpSession:
     async def create(cls, config: AgentConfig, app_config: AppConfig, session_id: str = "") -> "AcpSession":
         """Start and initialize an ACP subprocess for one worker turn."""
 
-        command = cls.command_for_config(config)
+        command = cls._command_for_config(config)
         root = Path(config.pwd).resolve()
         client = _KanboardAcpClient(root)
         proc = await asyncio.create_subprocess_exec(
@@ -133,7 +133,7 @@ class AcpSession:
             raise
 
     @staticmethod
-    def command_for_config(config: AgentConfig) -> tuple[str, ...]:
+    def _command_for_config(config: AgentConfig) -> tuple[str, ...]:
         """Resolve the ACP executable command for an agent configuration."""
 
         if config.command:
