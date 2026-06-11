@@ -14,7 +14,7 @@ from asyncio_pool import AioPool
 from .agents import AcpSession, AcpSessionError
 from .config import AppConfig, BoardConfig
 from .kanboard import KanboardClient, KanboardError, column_lookup, get_me_sync
-from .task_markdown import build_agent_prompt, replace_output_section, summarize_output
+from .task_markdown import build_agent_prompt, replace_output_section
 
 LOGGER = logging.getLogger(__name__)
 WORK_STARTED_COMMENT = "Started working on this task."
@@ -40,7 +40,9 @@ class ClaimedTask:
 class Worker:
     """Poll Kanboard, run assigned tasks through an agent, and route results."""
 
-    def __init__(self, config: AppConfig, client: KanboardClient, user_id: int | str) -> None:
+    def __init__(
+        self, config: AppConfig, client: KanboardClient, user_id: int | str
+    ) -> None:
         """Create a worker with an explicit Kanboard client and numeric user id."""
 
         self.config = config
@@ -52,7 +54,9 @@ class Worker:
         """Build a production worker from config, resolving its Kanboard user id once."""
 
         user = get_me_sync(config.server.url, config.server.user, config.server.token)
-        client = KanboardClient(config.server.url, config.server.user, config.server.token)
+        client = KanboardClient(
+            config.server.url, config.server.user, config.server.token
+        )
         return cls(config=config, client=client, user_id=user["id"])
 
     @property
@@ -98,7 +102,10 @@ class Worker:
                     claimed_any = False
                     async for claimed in self.iter_claimed_work(pool):
                         claimed_any = True
-                        await pool.spawn(self.execute_claimed(claimed), cb=self._log_execution_failure)
+                        await pool.spawn(
+                            self.execute_claimed(claimed),
+                            cb=self._log_execution_failure,
+                        )
                     if not claimed_any:
                         await asyncio.sleep(self.config.worker.poll_interval)
         finally:
@@ -129,7 +136,9 @@ class Worker:
         for board in self.config.boards:
             lookup = await self._lookup_columns(board)
             board_tasks = await self._tasks_by_column(board)
-            for task in self._assigned_tasks(board_tasks.get(str(lookup.todo["id"]), [])):
+            for task in self._assigned_tasks(
+                board_tasks.get(str(lookup.todo["id"]), [])
+            ):
                 if await self._task_has_pending_subtasks(task):
                     continue
                 await self.client.move_task_to_column(
@@ -138,7 +147,9 @@ class Worker:
                     column_id=lookup.working["id"],
                     swimlane_id=task.get("swimlane_id", 0),
                 )
-                await self.client.create_comment(task["id"], self.user_id, WORK_STARTED_COMMENT)
+                await self.client.create_comment(
+                    task["id"], self.user_id, WORK_STARTED_COMMENT
+                )
                 return ClaimedTask(
                     board=board,
                     task=await self.client.get_task(task["id"]),
@@ -156,7 +167,9 @@ class Worker:
         for board in self.config.boards:
             lookup = await self._lookup_columns(board)
             for task in await self._all_board_tasks(board):
-                for subtask in await self._assigned_subtasks(task, status=SUBTASK_STATUS_TODO):
+                for subtask in await self._assigned_subtasks(
+                    task, status=SUBTASK_STATUS_TODO
+                ):
                     await self.client.update_subtask(
                         subtask["id"],
                         task["id"],
@@ -192,7 +205,9 @@ class Worker:
         for board in self.config.boards:
             lookup = await self._lookup_columns(board)
             board_tasks = await self._tasks_by_column(board)
-            working_tasks = self._assigned_tasks(board_tasks.get(str(lookup.working["id"]), []))
+            working_tasks = self._assigned_tasks(
+                board_tasks.get(str(lookup.working["id"]), [])
+            )
             for task in working_tasks:
                 await self.client.create_comment(task["id"], user_id, RECOVERY_COMMENT)
                 await self.client.move_task_to_column(
@@ -204,7 +219,9 @@ class Worker:
                 recovered += 1
 
             for task in self._all_tasks_from_columns(board_tasks):
-                for subtask in await self._assigned_subtasks(task, status=SUBTASK_STATUS_IN_PROGRESS):
+                for subtask in await self._assigned_subtasks(
+                    task, status=SUBTASK_STATUS_IN_PROGRESS
+                ):
                     if await self.client.has_subtask_timer(subtask["id"], user_id):
                         await self.client.stop_subtask_timer(subtask["id"], user_id)
                     await self.client.update_subtask(
@@ -214,7 +231,9 @@ class Worker:
                         user_id=user_id,
                         status=SUBTASK_STATUS_TODO,
                     )
-                    await self.client.create_comment(task["id"], user_id, RECOVERY_COMMENT)
+                    await self.client.create_comment(
+                        task["id"], user_id, RECOVERY_COMMENT
+                    )
                     recovered += 1
 
         if recovered:
@@ -228,6 +247,7 @@ class Worker:
         task_id = task["id"]
 
         try:
+            # create prompt for agent
             comments = await self.client.get_all_comments(task_id)
             metadata = await self.client.get_task_metadata(task_id)
             session_id = self._agent_session_id(claimed, metadata)
@@ -240,10 +260,12 @@ class Worker:
                 worker_username=self.config.server.user,
                 system_prompt=self.config.agent.system_prompt,
             )
+
+            # execute the agent in existing or new session
             async with await self._acp_session(session_id) as session:
                 response = await session.run_turn(prompt)
                 await self._save_agent_session_id(claimed, metadata, session.session_id)
-                card_text = summarize_output(session.agent_text())
+                card_text = session.agent_text().strip()[:6000]
 
             await self.client.create_comment(task_id, self.user_id, card_text)
 
@@ -251,11 +273,15 @@ class Worker:
                 await self._route_subtask_result(claimed, response)
                 return
 
-            updated = replace_output_section(str(task.get("description") or ""), card_text)
+            updated = replace_output_section(
+                str(task.get("description") or ""), card_text
+            )
             await self.client.update_task_description(task_id, updated)
 
             if response.stop_reason != "end_turn":
-                await self._block_task(claimed, f"Agent stopped with reason {response.stop_reason}.")
+                await self._block_task(
+                    claimed, f"Agent stopped with reason {response.stop_reason}."
+                )
             elif await self._agent_moved_task(claimed):
                 return
             elif await self._task_has_pending_subtasks(task):
@@ -276,7 +302,9 @@ class Worker:
         await self.client.create_comment(task_id, self.user_id, message)
         await self._move_task_to_column(claimed, claimed.blocked_column_id)
 
-    async def _route_subtask_result(self, claimed: ClaimedTask, response: PromptResponse) -> None:
+    async def _route_subtask_result(
+        self, claimed: ClaimedTask, response: PromptResponse
+    ) -> None:
         """Stop subtask timing and update subtask state after an ACP turn."""
 
         if not claimed.subtask:
@@ -287,7 +315,9 @@ class Worker:
             await self.client.stop_subtask_timer(claimed.subtask["id"], user_id)
 
         if response.stop_reason != "end_turn":
-            await self._block_subtask(claimed, f"Agent stopped with reason {response.stop_reason}.")
+            await self._block_subtask(
+                claimed, f"Agent stopped with reason {response.stop_reason}."
+            )
         else:
             await self.client.update_subtask(
                 claimed.subtask["id"],
@@ -314,7 +344,9 @@ class Worker:
             status=SUBTASK_STATUS_TODO,
         )
 
-    async def _move_task_to_column(self, claimed: ClaimedTask, column_id: int | str) -> None:
+    async def _move_task_to_column(
+        self, claimed: ClaimedTask, column_id: int | str
+    ) -> None:
         task = claimed.task
         await self.client.move_task_to_column(
             project_id=claimed.board.id,
@@ -334,7 +366,9 @@ class Worker:
             },
         )
 
-    async def _tasks_by_column(self, board: BoardConfig) -> dict[str, list[dict[str, Any]]]:
+    async def _tasks_by_column(
+        self, board: BoardConfig
+    ) -> dict[str, list[dict[str, Any]]]:
         tasks: dict[str, list[dict[str, Any]]] = {}
         for swimlane in await self.client.get_board(board.id):
             for column in swimlane.get("columns", []):
@@ -345,16 +379,24 @@ class Worker:
     async def _all_board_tasks(self, board: BoardConfig) -> list[dict[str, Any]]:
         return self._all_tasks_from_columns(await self._tasks_by_column(board))
 
-    def _all_tasks_from_columns(self, tasks_by_column: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    def _all_tasks_from_columns(
+        self, tasks_by_column: dict[str, list[dict[str, Any]]]
+    ) -> list[dict[str, Any]]:
         tasks: list[dict[str, Any]] = []
         for column_tasks in tasks_by_column.values():
             tasks.extend(column_tasks)
         return tasks
 
     def _assigned_tasks(self, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [task for task in tasks if task.get("assignee_username") == self.config.server.user]
+        return [
+            task
+            for task in tasks
+            if task.get("assignee_username") == self.config.server.user
+        ]
 
-    async def _assigned_subtasks(self, task: dict[str, Any], status: int | None = None) -> list[dict[str, Any]]:
+    async def _assigned_subtasks(
+        self, task: dict[str, Any], status: int | None = None
+    ) -> list[dict[str, Any]]:
         subtasks = []
         for subtask in await self.client.get_all_subtasks(task["id"]):
             if _coerce_int(subtask.get("user_id")) != _coerce_int(self.user_id):
@@ -373,12 +415,17 @@ class Worker:
     async def _acp_session(self, session_id: str = "") -> AcpSession:
         """Create a connected ACP session for the configured worker agent."""
 
-        return await AcpSession.create(self.config.agent, self.config, session_id=session_id)
+        return await AcpSession.create(
+            self.config.agent, self.config, session_id=session_id
+        )
 
     def _agent_session_id(self, claimed: ClaimedTask, metadata: dict[str, str]) -> str:
         """Return the stored ACP session id for the claimed work, if present."""
 
-        key = session_metadata_key(self.config.server.user, claimed.subtask.get("id") if claimed.subtask else None)
+        key = session_metadata_key(
+            self.config.server.user,
+            claimed.subtask.get("id") if claimed.subtask else None,
+        )
         session_id = metadata.get(key)
         return session_id or ""
 
@@ -392,7 +439,10 @@ class Worker:
 
         if not session_id:
             return
-        key = session_metadata_key(self.config.server.user, claimed.subtask.get("id") if claimed.subtask else None)
+        key = session_metadata_key(
+            self.config.server.user,
+            claimed.subtask.get("id") if claimed.subtask else None,
+        )
         if metadata.get(key) == session_id:
             return
         await self.client.save_task_metadata(claimed.task["id"], {key: session_id})
@@ -404,12 +454,16 @@ class Worker:
         current = await self.client.get_task(claimed.task["id"])
         return str(current.get("column_id")) != str(claimed.task.get("column_id"))
 
-    async def _log_execution_failure(self, result: Any, error: tuple[BaseException, str] | None, context: Any) -> None:
+    async def _log_execution_failure(
+        self, result: Any, error: tuple[BaseException, str] | None, context: Any
+    ) -> None:
         """Log exceptions raised by a pooled task execution."""
 
         if error:
             exc, traceback_text = error
-            LOGGER.error("Background task execution failed: %s\n%s", exc, traceback_text)
+            LOGGER.error(
+                "Background task execution failed: %s\n%s", exc, traceback_text
+            )
 
 
 def session_metadata_key(server_user: str, subtask_id: int | str | None = None) -> str:

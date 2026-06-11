@@ -139,15 +139,6 @@ def replace_output_section(markdown: str, output: str) -> str:
     return markdown.rstrip() + "\n\n" + replacement
 
 
-def summarize_output(output: str, max_chars: int = 6000) -> str:
-    """Return bounded text suitable for a Kanboard comment and Output section."""
-
-    clean = output.strip()
-    if len(clean) <= max_chars:
-        return clean or "Agent completed without output."
-    return clean[:max_chars].rstrip() + "\n\n[Output truncated by worker.]"
-
-
 def _merged_system_prompt(system_prompt: str) -> str:
     configured = system_prompt.strip()
     if not configured:

@@ -383,6 +383,50 @@ def test_worker_respects_card_move_done_by_agent_tool(tmp_path: Path) -> None:
     assert moves == []
 
 
+def test_worker_truncates_agent_text_inline(tmp_path: Path) -> None:
+    comments = []
+    descriptions = []
+    moves = []
+    key = session_metadata_key("codex-node1")
+
+    class FakeClient:
+        async def get_all_comments(self, task_id):
+            return []
+
+        async def get_task_metadata(self, task_id):
+            return {key: "session-123"}
+
+        async def create_comment(self, task_id, user_id, comment):
+            comments.append(comment)
+
+        async def save_task_metadata(self, task_id, values):
+            raise AssertionError("existing session id should not be saved again")
+
+        async def update_task_description(self, task_id, description):
+            descriptions.append(description)
+
+        async def get_all_subtasks(self, task_id):
+            return []
+
+        async def move_task_to_column(self, project_id, task_id, column_id, swimlane_id=0):
+            moves.append(column_id)
+
+    worker = Worker(_config(tmp_path), client=FakeClient(), user_id=9)
+    _install_fake_acp_session(worker, text="x" * 6005)
+    claimed = ClaimedTask(
+        board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
+        task={"id": "42", "description": "## Spec\nDo it\n\n## Output\nold"},
+        done_column_id=3,
+        blocked_column_id=4,
+    )
+
+    asyncio.run(worker.execute_claimed(claimed))
+
+    assert comments == ["x" * 6000]
+    assert descriptions[-1].strip().endswith("x" * 6000)
+    assert moves == [3]
+
+
 def test_worker_does_not_complete_parent_when_agent_tool_created_pending_subtasks(tmp_path: Path) -> None:
     comments = []
     descriptions = []
