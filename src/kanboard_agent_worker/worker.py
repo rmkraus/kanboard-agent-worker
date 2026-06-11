@@ -205,8 +205,13 @@ class Worker:
         thread_id = (metadata or {}).get(key)
         if not thread_id:
             thread_id = self.client.get_task_metadata_by_name(task["id"], key)
-        default_thread_id = default_thread_id_for_task(self.config.server.user, claimed.board.id, task["id"])
-        return create_agent_wrapper(self.config.agent, thread_id=thread_id or None, default_thread_id=default_thread_id)
+        return create_agent_wrapper(
+            self.config.agent,
+            thread_id=thread_id or None,
+            worker_username=self.config.server.user,
+            project_id=claimed.board.id,
+            task_id=task["id"],
+        )
 
     def _save_agent_thread_id(self, task: dict[str, Any], thread_id: str | None) -> None:
         if not thread_id:
@@ -234,7 +239,3 @@ class Worker:
 
 def thread_metadata_key(server_user: str) -> str:
     return f"kanboard_agent.{server_user}.thread_id"
-
-
-def default_thread_id_for_task(server_user: str, project_id: int | str, task_id: int | str) -> str:
-    return f"kanboard-{server_user}-{project_id}-{task_id}"

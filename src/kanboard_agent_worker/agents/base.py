@@ -34,6 +34,10 @@ class AgentExecResult:
 
 
 class AgentWrapper(Protocol):
+    @classmethod
+    def create_session_id(cls, worker_username: str, project_id: int | str, task_id: int | str) -> str:
+        ...
+
     def exec(self, prompt: str) -> AgentExecResult:
         ...
 
@@ -41,6 +45,10 @@ class AgentWrapper(Protocol):
 class BaseAgentWrapper:
     def __init__(self, config: AgentConfig) -> None:
         self.config = config
+
+    @classmethod
+    def create_session_id(cls, worker_username: str, project_id: int | str, task_id: int | str) -> str:
+        return f"kanboard-{worker_username}-{project_id}-{task_id}"
 
     def _run(self, command: list[str], input_text: str | None = None) -> subprocess.CompletedProcess[str]:
         try:

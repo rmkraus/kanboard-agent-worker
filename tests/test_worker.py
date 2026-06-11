@@ -3,15 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from kanboard_agent_worker.config import AgentConfig, AppConfig, BoardConfig, ServerConfig, WorkerSettings
-from kanboard_agent_worker.worker import Worker, default_thread_id_for_task, thread_metadata_key
+from kanboard_agent_worker.worker import Worker, thread_metadata_key
 
 
 def test_thread_metadata_key_uses_server_user() -> None:
     assert thread_metadata_key("codex-node1") == "kanboard_agent.codex-node1.thread_id"
-
-
-def test_default_thread_id_includes_worker_project_and_task() -> None:
-    assert default_thread_id_for_task("codex-node1", 3, 42) == "kanboard-codex-node1-3-42"
 
 
 def test_worker_saves_changed_agent_thread_id(tmp_path: Path) -> None:

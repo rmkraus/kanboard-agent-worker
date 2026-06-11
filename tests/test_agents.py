@@ -7,6 +7,7 @@ from kanboard_agent_worker.agents import (
     ClaudeAgentWrapper,
     CodexAgentWrapper,
     SubprocessAgentWrapper,
+    create_agent_wrapper,
 )
 from kanboard_agent_worker.config import AgentConfig
 
@@ -70,6 +71,23 @@ print(" ".join(sys.argv[1:]))
     assert first.output == "-n ryan -p hello"
     assert second.output == "--resume ryan -p HELLO"
     assert second.thread_id == "ryan"
+
+
+def test_wrapper_factory_creates_claude_session_id(tmp_path: Path) -> None:
+    wrapper = create_agent_wrapper(
+        AgentConfig(name="claude", command=("claude",), pwd=str(tmp_path)),
+        worker_username="codex-node1",
+        project_id=3,
+        task_id=42,
+    )
+
+    assert isinstance(wrapper, ClaudeAgentWrapper)
+    assert wrapper.session_name == "kanboard-codex-node1-3-42"
+    assert not wrapper.session_exists
+
+
+def test_base_create_session_id_format() -> None:
+    assert ClaudeAgentWrapper.create_session_id("codex-node1", 3, 42) == "kanboard-codex-node1-3-42"
 
 
 def test_parse_codex_jsonl_helpers() -> None:
