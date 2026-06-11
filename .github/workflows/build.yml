@@ -1,0 +1,141 @@
+name: Build Binaries
+
+run-name: Build ${{ github.ref_name }} @ ${{ github.sha }}
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.96.0"
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            package: kanboard-agent-worker-x86_64-unknown-linux-musl.tar.gz
+            rustflags: ""
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            package: kanboard-agent-worker-aarch64-unknown-linux-musl.tar.gz
+            rustflags: ""
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            package: kanboard-agent-worker-x86_64-pc-windows-msvc.zip
+            rustflags: "-C target-feature=+crt-static"
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            package: kanboard-agent-worker-aarch64-pc-windows-msvc.zip
+            rustflags: "-C target-feature=+crt-static"
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            package: kanboard-agent-worker-x86_64-apple-darwin.tar.gz
+            rustflags: ""
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            package: kanboard-agent-worker-aarch64-apple-darwin.tar.gz
+            rustflags: ""
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install "${{ env.RUST_VERSION }}" --profile minimal --target "${{ matrix.target }}"
+
+      - name: Install Linux static build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Configure Linux musl linker
+        if: runner.os == 'Linux'
+        run: |
+          cargo_target_env="$(echo "${{ matrix.target }}" | tr '[:lower:]-' '[:upper:]_')"
+          cc_target_env="$(echo "${{ matrix.target }}" | tr '-' '_')"
+          {
+            echo "CARGO_TARGET_${cargo_target_env}_LINKER=musl-gcc"
+            echo "CC_${cc_target_env}=musl-gcc"
+          } >> "$GITHUB_ENV"
+
+      - name: Build release binary
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo +${{ env.RUST_VERSION }} build --release --locked --target "${{ matrix.target }}"
+
+      - name: Validate release binary
+        if: runner.os != 'Windows'
+        run: |
+          binary="target/${{ matrix.target }}/release/kanboard-agent-worker"
+          "$binary" --help > /dev/null
+
+      - name: Validate release binary
+        if: runner.os == 'Windows'
+        run: |
+          $binary = "target\${{ matrix.target }}\release\kanboard-agent-worker.exe"
+          & $binary --help | Out-Null
+
+      - name: Verify Linux binary is static
+        if: runner.os == 'Linux'
+        run: |
+          binary="target/${{ matrix.target }}/release/kanboard-agent-worker"
+          readelf -d "$binary" > dynamic-section.txt || true
+          if grep -q "NEEDED" dynamic-section.txt; then
+            cat dynamic-section.txt
+            echo "::error::Linux binary has dynamic library dependencies."
+            exit 1
+          fi
+
+      - name: Package binary
+        if: runner.os != 'Windows'
+        run: |
+          package_dir="${{ matrix.package }}"
+          package_dir="${package_dir%.tar.gz}"
+          mkdir -p "dist" "staging/$package_dir"
+          cp "target/${{ matrix.target }}/release/kanboard-agent-worker" "staging/$package_dir/"
+          chmod +x "staging/$package_dir/kanboard-agent-worker"
+          printf "%s\n" "${{ github.sha }}" > "staging/$package_dir/COMMIT"
+          tar -C staging -czf "dist/${{ matrix.package }}" "$package_dir"
+          shasum -a 256 "dist/${{ matrix.package }}" > "dist/${{ matrix.package }}.sha256"
+
+      - name: Package binary
+        if: runner.os == 'Windows'
+        run: |
+          $package = "${{ matrix.package }}"
+          $packageDir = $package -replace '\.zip$', ''
+          New-Item -ItemType Directory -Force -Path "dist", "staging\$packageDir" | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\kanboard-agent-worker.exe" "staging\$packageDir\"
+          Set-Content -Path "staging\$packageDir\COMMIT" -Value "${{ github.sha }}"
+          Compress-Archive -Path "staging\$packageDir" -DestinationPath "dist\$package" -Force
+          $hash = (Get-FileHash "dist\$package" -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "dist\$package.sha256" -Value "$hash  $package"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package }}
+          path: |
+            dist/${{ matrix.package }}
+            dist/${{ matrix.package }}.sha256
+          if-no-files-found: error
+          retention-days: 30
