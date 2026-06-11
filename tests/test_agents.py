@@ -50,6 +50,32 @@ print(json.dumps({{"type": "item.completed", "item": {{"type": "agent_message", 
     assert result.output == "done"
 
 
+def test_codex_wrapper_create_thread_id_runs_hello(tmp_path: Path) -> None:
+    args_file = tmp_path / "args.txt"
+    stdin_file = tmp_path / "stdin.txt"
+    fake_codex = tmp_path / "codex"
+    fake_codex.write_text(
+        f"""#!{sys.executable}
+import json
+import pathlib
+import sys
+pathlib.Path({str(args_file)!r}).write_text(" ".join(sys.argv[1:]), encoding="utf-8")
+pathlib.Path({str(stdin_file)!r}).write_text(sys.stdin.read(), encoding="utf-8")
+print(json.dumps({{"type": "thread.started", "thread_id": "thread-123"}}))
+""",
+        encoding="utf-8",
+    )
+    fake_codex.chmod(0o755)
+    wrapper = CodexAgentWrapper(AgentConfig(name="codex", command=(str(fake_codex),), pwd=str(tmp_path)))
+
+    thread_id = wrapper.create_thread_id(3, 42)
+
+    assert thread_id == "thread-123"
+    assert wrapper.thread_id == "thread-123"
+    assert args_file.read_text(encoding="utf-8") == "exec --skip-git-repo-check --json -"
+    assert stdin_file.read_text(encoding="utf-8") == "hello"
+
+
 def test_claude_wrapper_creates_then_resumes_named_session(tmp_path: Path) -> None:
     fake_claude = tmp_path / "claude"
     fake_claude.write_text(
@@ -73,21 +99,38 @@ print(" ".join(sys.argv[1:]))
     assert second.thread_id == "ryan"
 
 
-def test_wrapper_factory_creates_claude_session_id(tmp_path: Path) -> None:
+def test_claude_wrapper_create_thread_id_runs_named_hello(tmp_path: Path) -> None:
+    args_file = tmp_path / "args.txt"
+    fake_claude = tmp_path / "claude"
+    fake_claude.write_text(
+        f"""#!{sys.executable}
+import pathlib
+import sys
+pathlib.Path({str(args_file)!r}).write_text(" ".join(sys.argv[1:]), encoding="utf-8")
+print("created")
+""",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+    wrapper = ClaudeAgentWrapper(AgentConfig(name="claude", command=(str(fake_claude),), pwd=str(tmp_path)))
+
+    thread_id = wrapper.create_thread_id(3, 42)
+
+    assert thread_id == "kanboard-3-42"
+    assert wrapper.session_name == "kanboard-3-42"
+    assert wrapper.session_exists
+    assert args_file.read_text(encoding="utf-8") == "-n kanboard-3-42 -p hello"
+
+
+def test_wrapper_factory_uses_existing_claude_thread_id(tmp_path: Path) -> None:
     wrapper = create_agent_wrapper(
         AgentConfig(name="claude", command=("claude",), pwd=str(tmp_path)),
-        worker_username="codex-node1",
-        project_id=3,
-        task_id=42,
+        thread_id="kanboard-3-42",
     )
 
     assert isinstance(wrapper, ClaudeAgentWrapper)
-    assert wrapper.session_name == "kanboard-codex-node1-3-42"
-    assert not wrapper.session_exists
-
-
-def test_base_create_session_id_format() -> None:
-    assert ClaudeAgentWrapper.create_session_id("codex-node1", 3, 42) == "kanboard-codex-node1-3-42"
+    assert wrapper.session_name == "kanboard-3-42"
+    assert wrapper.session_exists
 
 
 def test_parse_codex_jsonl_helpers() -> None:

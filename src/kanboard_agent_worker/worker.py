@@ -121,6 +121,7 @@ class Worker:
             metadata = self.client.get_task_metadata(task_id)
             self.client.create_comment(task_id, self._ensure_user_id(), f"Starting `{self.config.agent.name}`.")
             wrapper = self._agent_wrapper(claimed, metadata)
+            self._ensure_agent_thread_id(claimed, wrapper, metadata)
             prompt = build_agent_prompt(
                 task,
                 comments=comments,
@@ -205,13 +206,23 @@ class Worker:
         thread_id = (metadata or {}).get(key)
         if not thread_id:
             thread_id = self.client.get_task_metadata_by_name(task["id"], key)
-        return create_agent_wrapper(
-            self.config.agent,
-            thread_id=thread_id or None,
-            worker_username=self.config.server.user,
-            project_id=claimed.board.id,
-            task_id=task["id"],
-        )
+        return create_agent_wrapper(self.config.agent, thread_id=thread_id or None)
+
+    def _ensure_agent_thread_id(self, claimed: ClaimedTask, wrapper, metadata: dict[str, str]) -> str:
+        task = claimed.task
+        key = thread_metadata_key(self.config.server.user)
+        thread_id = metadata.get(key)
+        if not thread_id:
+            thread_id = self.client.get_task_metadata_by_name(task["id"], key)
+        if thread_id:
+            metadata[key] = thread_id
+            return thread_id
+
+        thread_id = wrapper.create_thread_id(claimed.board.id, task["id"])
+        if thread_id:
+            metadata[key] = thread_id
+            self._save_agent_thread_id(task, thread_id)
+        return thread_id
 
     def _save_agent_thread_id(self, task: dict[str, Any], thread_id: str | None) -> None:
         if not thread_id:

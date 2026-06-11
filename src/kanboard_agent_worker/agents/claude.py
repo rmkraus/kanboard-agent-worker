@@ -10,6 +10,16 @@ class ClaudeAgentWrapper(BaseAgentWrapper):
         self.session_name = session_name
         self.session_exists = session_exists
 
+    def create_thread_id(self, project_id: int | str, task_id: int | str) -> str:
+        session_name = f"kanboard-{project_id}-{task_id}"
+        command = [self._executable(), "-n", session_name, "-p", "hello"]
+        completed = self._run(command)
+        if completed.returncode != 0:
+            raise AgentExecutionError(f"Claude thread creation failed with exit code {completed.returncode}")
+        self.session_name = session_name
+        self.session_exists = True
+        return session_name
+
     def exec(self, prompt: str) -> AgentExecResult:
         if not self.session_name:
             raise AgentExecutionError("Claude requires a session name")

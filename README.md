@@ -86,8 +86,8 @@ already exist. Older configs may use `agent.cwd`, but `agent.pwd` is preferred.
 
 For built-in adapters, `agent.name` selects behavior:
 
-- `codex`: runs `codex exec --json`, extracts the last agent message from JSONL, stores the emitted thread UUID in task metadata, and resumes by UUID.
-- `claude`: runs `claude -n <session> -p <prompt>` for a new task session, then `claude --resume <session> -p <prompt>` for later turns. Claude's stdout is the card response.
+- `codex`: creates a thread with `codex exec --json` and `hello`, extracts the emitted thread UUID from JSONL, stores it in task metadata, then resumes by UUID and uses the last JSONL agent message as the card response.
+- `claude`: creates a task session with `claude -n kanboard-{project_id}-{task_id} -p hello`, then runs `claude --resume <session> -p <prompt>`. Claude's stdout is the card response.
 - anything else: generic subprocess runner using `agent.command`.
 
 All adapters receive the same prompt template. It includes the worker username,
@@ -149,7 +149,7 @@ If `## Spec` is missing, the worker sends the whole description to the agent.
 4. Move claimed tasks to the working column.
 5. Build one agent prompt from card metadata, conversation, worker identity, task description, and system prompt.
 6. Run the selected agent wrapper from `agent.pwd`.
-7. Save any emitted thread/session id in Kanboard task metadata.
+7. Save any emitted thread id in Kanboard task metadata.
 8. Post the wrapper's visible response to the Kanboard comments and update `## Output`.
 9. Move successful tasks to done; move failed tasks to blocked.
 

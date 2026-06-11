@@ -4,13 +4,25 @@ import json
 from typing import Any
 
 from ..config import AgentConfig
-from .base import AgentExecResult, BaseAgentWrapper
+from .base import AgentExecResult, AgentExecutionError, BaseAgentWrapper
 
 
 class CodexAgentWrapper(BaseAgentWrapper):
     def __init__(self, config: AgentConfig, thread_id: str | None = None) -> None:
         super().__init__(config)
         self.thread_id = thread_id
+
+    def create_thread_id(self, project_id: int | str, task_id: int | str) -> str:
+        command = [self._executable(), "exec", "--skip-git-repo-check", "--json", "-"]
+        completed = self._run(command, input_text="hello")
+        events = tuple(self._parse_jsonl_events(completed.stdout))
+        thread_id = self._thread_id_from_events(events)
+        if completed.returncode != 0:
+            raise AgentExecutionError(f"Codex thread creation failed with exit code {completed.returncode}")
+        if not thread_id:
+            raise AgentExecutionError("Codex did not emit thread.started with a thread_id")
+        self.thread_id = thread_id
+        return thread_id
 
     def exec(self, prompt: str) -> AgentExecResult:
         if self.thread_id:
