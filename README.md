@@ -188,7 +188,8 @@ returns the parent card to the configured todo/ready column.
    in-progress subtasks.
 4. Claim assigned todo subtasks from any column until concurrency is full.
 5. Claim assigned whole tasks from the todo column when they have no pending
-   subtasks.
+   subtasks and no active internal `is blocked by` task link in the configured
+   todo, working, or blocked columns.
 6. Move claimed whole tasks to the working column.
 7. Build one agent prompt from card metadata, conversation, worker identity, task
    description, and system prompt.
@@ -205,6 +206,7 @@ returns the parent card to the configured todo/ready column.
 
 The implementation uses Kanboard JSON-RPC 2.0 via POST requests, `getBoard` to
 read swimlanes/columns/tasks, `moveTaskPosition` for column moves,
-`createComment` for progress comments, `getAllSubtasks` and `updateSubtask` for subtask lifecycle, `setSubtaskStartTime` and
+`createComment` for progress comments, `getAllTaskLinks` for internal dependency checks,
+`getAllSubtasks` and `updateSubtask` for subtask lifecycle, `setSubtaskStartTime` and
 `setSubtaskEndTime` for timers, task file methods for attachments, and `getMe`
 to resolve the authenticated user's numeric ID for comments.

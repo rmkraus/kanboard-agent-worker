@@ -20,6 +20,7 @@ LOGGER = logging.getLogger(__name__)
 WORK_STARTED_COMMENT = "Started working on this task."
 SUBTASK_WORK_STARTED_COMMENT = "Started working on subtask #{subtask_id}: {title}"
 RECOVERY_COMMENT = "Sorry, I fell asleep on the job. I'll get back to this."
+BLOCKED_BY_LINK_LABEL = "is blocked by"
 SUBTASK_STATUS_TODO = 0
 SUBTASK_STATUS_IN_PROGRESS = 1
 SUBTASK_STATUS_DONE = 2
@@ -132,8 +133,15 @@ class Worker:
         for board in self.config.boards:
             lookup = await self._lookup_columns(board)
             board_tasks = await self._tasks_by_column(board)
+            blocking_column_titles = {
+                str(lookup.todo["title"]),
+                str(lookup.working["title"]),
+                str(lookup.blocked["title"]),
+            }
             for task in self._assigned_tasks(board_tasks.get(str(lookup.todo["id"]), [])):
                 if await self._task_has_pending_subtasks(task):
+                    continue
+                if await self._task_has_active_blocking_link(task, blocking_column_titles):
                     continue
                 await self.client.move_task_to_column(
                     project_id=board.id,
@@ -380,6 +388,21 @@ class Worker:
             _coerce_int(subtask.get("status")) != SUBTASK_STATUS_DONE
             for subtask in await self.client.get_all_subtasks(task["id"])
         )
+
+    async def _task_has_active_blocking_link(self, task: dict[str, Any], column_titles: set[str]) -> bool:
+        for link in await self.client.get_all_task_links(task["id"]):
+            if str(link.get("label", "")).casefold() != BLOCKED_BY_LINK_LABEL:
+                continue
+            if str(link.get("column_title", "")) not in column_titles:
+                continue
+            LOGGER.info(
+                "Skipping task %s because it is blocked by linked task %s in column %s",
+                task.get("id"),
+                link.get("task_id"),
+                link.get("column_title"),
+            )
+            return True
+        return False
 
     async def _acp_session(self, session_id: str = "") -> AcpSession:
         """Create a connected ACP session for the configured worker agent."""
