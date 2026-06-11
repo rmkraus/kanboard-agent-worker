@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import sys
 
@@ -23,18 +24,21 @@ def main(argv: list[str] | None = None) -> int:
     subparsers.add_parser("run", help="Run the polling worker continuously")
 
     args = parser.parse_args(argv)
-    logging.basicConfig(level=getattr(logging, str(args.log_level).upper(), logging.INFO), format="%(levelname)s %(message)s")
+    logging.basicConfig(
+        level=getattr(logging, str(args.log_level).upper(), logging.INFO),
+        format="%(levelname)s %(message)s",
+    )
 
     try:
         config = load_config(args.config)
-        worker = Worker(config)
+        worker = Worker.from_config(config)
 
         if args.command == "check":
-            for line in worker.check():
+            for line in asyncio.run(_check(worker)):
                 print(line)
             return 0
         if args.command == "run":
-            worker.run_forever()
+            asyncio.run(worker.run_forever())
             return 0
     except (ConfigError, KanboardError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -44,3 +48,12 @@ def main(argv: list[str] | None = None) -> int:
         return 130
 
     return 2
+
+
+async def _check(worker: Worker) -> list[str]:
+    """Run the async check command and close client resources."""
+
+    try:
+        return await worker.check()
+    finally:
+        await worker.close()

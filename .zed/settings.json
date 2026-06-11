@@ -1,0 +1,13 @@
+{
+  "languages": {
+    "Python": {
+      "format_on_save": "on",
+      "formatter": {
+        "external": {
+          "command": "black",
+          "arguments": ["--stdin-filename", "{buffer_path}", "-"]
+        }
+      }
+    }
+  }
+}

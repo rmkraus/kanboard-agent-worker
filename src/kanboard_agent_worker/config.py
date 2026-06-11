@@ -37,14 +37,13 @@ class BoardConfig:
 
 @dataclass(frozen=True)
 class AgentConfig:
-    """Local CLI agent execution settings."""
+    """ACP agent execution settings."""
 
     name: str
     command: tuple[str, ...]
     pwd: str
     system_prompt: str = ""
     timeout_seconds: int = 3600
-    pass_task_on_stdin: bool = True
 
 
 @dataclass(frozen=True)
@@ -56,6 +55,14 @@ class WorkerSettings:
 
 
 @dataclass(frozen=True)
+class RosterEntry:
+    """One agent that can receive generated subtasks."""
+
+    name: str
+    description: str = ""
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """Fully validated application configuration."""
 
@@ -63,6 +70,7 @@ class AppConfig:
     worker: WorkerSettings
     agent: AgentConfig
     boards: tuple[BoardConfig, ...]
+    roster: tuple[RosterEntry, ...] = ()
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -88,6 +96,7 @@ def _from_mapping(raw: dict[str, Any], config_dir: Path) -> AppConfig:
     worker_raw = raw.get("worker") or {}
     agent_raw = raw.get("agent") or {}
     boards_raw = raw.get("boards")
+    roster_raw = raw.get("roster") or []
 
     if not isinstance(worker_raw, dict):
         raise ConfigError("worker must be a mapping")
@@ -119,11 +128,11 @@ def _from_mapping(raw: dict[str, Any], config_dir: Path) -> AppConfig:
         pwd=_agent_pwd(agent_raw, config_dir),
         system_prompt=str(agent_raw.get("system_prompt", "")).strip(),
         timeout_seconds=_positive_int(agent_raw.get("timeout_seconds", 3600), "agent.timeout_seconds"),
-        pass_task_on_stdin=bool(agent_raw.get("pass_task_on_stdin", True)),
     )
 
     boards = tuple(_board_from_mapping(item, index) for index, item in enumerate(boards_raw))
-    return AppConfig(server=server, worker=worker, agent=agent, boards=boards)
+    roster = tuple(_roster_entry_from_mapping(item, index) for index, item in enumerate(roster_raw))
+    return AppConfig(server=server, worker=worker, agent=agent, boards=boards, roster=roster)
 
 
 def _required_mapping(raw: dict[str, Any], key: str) -> dict[str, Any]:
@@ -148,6 +157,15 @@ def _board_from_mapping(raw: Any, index: int) -> BoardConfig:
         blocked=str(raw["blocked"]),
         done=str(raw["done"]),
     )
+
+
+def _roster_entry_from_mapping(raw: Any, index: int) -> RosterEntry:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"roster[{index}] must be a mapping")
+    if raw.get("name") in (None, ""):
+        raise ConfigError(f"roster[{index}] missing required field: name")
+
+    return RosterEntry(name=str(raw["name"]), description=str(raw.get("description", "")).strip())
 
 
 def _env_or_value(env_name: str, value: Any, path: str) -> str:

@@ -7,15 +7,20 @@ worker:
   max_concurrency: 1
   poll_interval: 10
 
+roster:
+  - name: codex
+    description: Repository-oriented coding agent
+  - name: claude
+    description: General implementation agent
+
 agent:
   name: codex
   pwd: .
   system_prompt: |
     Follow the card instructions and keep the final response concise.
   command:
-    - codex
+    - codex-acp
   timeout_seconds: 3600
-  pass_task_on_stdin: true
 
 boards:
   - id: 1

@@ -29,6 +29,11 @@ boards:
     working: In Process
     blocked: Escalate
     done: Complete
+roster:
+  - name: claude
+    description: Strong at implementation
+  - name: codex
+    description: Strong at repository work
 """,
         encoding="utf-8",
     )
@@ -50,6 +55,8 @@ boards:
     assert config.agent.pwd == str(workdir.resolve())
     assert config.agent.system_prompt == "Prefer small changes."
     assert config.boards[0].working == "In Process"
+    assert config.roster[0].name == "claude"
+    assert config.roster[1].description == "Strong at repository work"
 
 
 def test_agent_pwd_env_override(tmp_path: Path, monkeypatch) -> None:
