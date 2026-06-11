@@ -33,8 +33,12 @@ def test_build_agent_prompt_contains_identity_metadata_conversation_and_system_p
     assert "kanboard_worker.codex-node1.session_id" in prompt
     assert "claude: Handles UI work" in prompt
     assert "1000 alice: Please fix this" in prompt
-    assert "Use the available Kanboard tools for attachments, creating subtasks" in prompt
-    assert "Use the Kanboard move_column tool" in prompt
+    assert "Use list_attachments to inspect task files" in prompt
+    assert "Use add_subtask for follow-up work" in prompt
+    assert "Use move_column only for intentional workflow routing" in prompt
+    assert "- blocked: move here when progress requires a human decision" in prompt
+    assert "- done: move here only when the card's requested work is complete" in prompt
+    assert "Do not move the parent task unless the parent itself needs a workflow change." in prompt
     assert "Your final response from this turn will be posted as a Kanboard card comment" in prompt
 
 
