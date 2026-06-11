@@ -1,0 +1,23 @@
+server:
+  user: admin
+  token: admin
+  url: http://localhost:8080
+
+worker:
+  max_concurrency: 1
+  poll_interval: 10
+
+agent:
+  name: codex
+  command:
+    - codex
+    - exec
+  timeout_seconds: 3600
+  pass_task_on_stdin: true
+
+boards:
+  - id: 1
+    todo: "Intake"
+    working: "In Process"
+    blocked: "Escalate"
+    done: "Complete"
