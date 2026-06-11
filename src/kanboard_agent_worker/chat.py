@@ -297,7 +297,7 @@ class AcpSession:
     @classmethod
     async def create(
         cls, config: AgentConfig, app_config: AppConfig, session_id: str = ""
-    ) -> "AcpSession":
+    ) -> AcpSession:
         """Start and initialize an ACP subprocess for one worker turn."""
 
         command = cls._command_for_config(config)
@@ -413,7 +413,7 @@ class AcpSession:
         with contextlib.suppress(Exception):
             await asyncio.wait_for(self._stderr_task, timeout=1)
 
-    async def __aenter__(self) -> "AcpSession":
+    async def __aenter__(self) -> AcpSession:
         """Return this connected session for async context manager use."""
 
         return self

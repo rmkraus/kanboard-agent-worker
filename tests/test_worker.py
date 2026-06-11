@@ -7,15 +7,14 @@ from acp.schema import PromptResponse
 
 from kanboard_agent_worker.config import AgentConfig, AppConfig, BoardConfig, ServerConfig, WorkerSettings
 from kanboard_agent_worker.worker import (
-    ClaimedTask,
     RECOVERY_COMMENT,
-    session_metadata_key,
     SUBTASK_STATUS_DONE,
     SUBTASK_STATUS_IN_PROGRESS,
-    SUBTASK_STATUS_TODO,
     SUBTASK_WORK_STARTED_COMMENT,
-    Worker,
     WORK_STARTED_COMMENT,
+    ClaimedTask,
+    Worker,
+    session_metadata_key,
 )
 
 
@@ -532,7 +531,7 @@ class FakeAcpSession:
         self._prompt_fragment = prompt_fragment
         self._response = PromptResponse(stop_reason=stop_reason)
 
-    async def __aenter__(self) -> "FakeAcpSession":
+    async def __aenter__(self) -> FakeAcpSession:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import itertools
-import base64
 import asyncio
+import base64
+import itertools
 from dataclasses import dataclass
 from typing import Any
 
@@ -51,7 +51,7 @@ class KanboardClient:
 
         await self.session.aclose()
 
-    async def __aenter__(self) -> "KanboardClient":
+    async def __aenter__(self) -> KanboardClient:
         """Return this client for async context manager use."""
 
         return self

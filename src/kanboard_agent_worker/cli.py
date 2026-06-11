@@ -24,7 +24,10 @@ def main(argv: list[str] | None = None) -> int:
     subparsers.add_parser("run", help="Run the polling worker continuously")
 
     args = parser.parse_args(argv)
-    logging.basicConfig(level=getattr(logging, str(args.log_level).upper(), logging.INFO), format="%(levelname)s %(message)s")
+    logging.basicConfig(
+        level=getattr(logging, str(args.log_level).upper(), logging.INFO),
+        format="%(levelname)s %(message)s",
+    )
 
     try:
         config = load_config(args.config)

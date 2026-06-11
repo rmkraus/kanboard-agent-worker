@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import base64
 import asyncio
+import base64
 
 from kanboard_agent_worker import kanboard
 from kanboard_agent_worker.kanboard import KanboardClient, _is_database_locked_error, column_lookup, normalize_endpoint
@@ -34,7 +34,7 @@ def test_get_me_sync_runs_short_async_client(monkeypatch) -> None:
         def __init__(self, url, user, token, **kwargs) -> None:
             self.args = (url, user, token, kwargs)
 
-        async def __aenter__(self) -> "FakeClient":
+        async def __aenter__(self) -> FakeClient:
             return self
 
         async def __aexit__(self, exc_type, exc, tb) -> None:

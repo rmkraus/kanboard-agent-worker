@@ -29,13 +29,18 @@ def test_build_agent_prompt_contains_identity_metadata_conversation_and_system_p
     assert "1000 alice: Please fix this" in prompt
     assert "Kanboard tool use:" in prompt
     assert "Handoff work to another agent with add_subtask" in prompt
-    assert "Manage shared files with list_attachments, get_attachment, upload_attachment, and delete_attachment" in prompt
+    assert (
+        "Manage shared files with list_attachments, get_attachment, upload_attachment, and delete_attachment"
+        in prompt
+    )
     assert "Share links, attachment references, and coordination notes with add_comment" in prompt
     assert "Use move_column only for intentional workflow routing" in prompt
-    assert "the worker returns parent cards with pending subtasks to todo after your turn" in prompt
+    assert "the worker returns parent cards" in prompt
+    assert "with pending subtasks to todo after your turn" in prompt
     assert "- blocked: move here when progress requires a human decision" in prompt
     assert "- done: move here only when the card's requested work is complete" in prompt
-    assert "Do not move the parent task unless the parent itself needs a workflow change." in prompt
+    assert "Do not move the parent" in prompt
+    assert "unless the parent itself needs a workflow change." in prompt
     assert "Your final response from this turn will be posted as a Kanboard card comment." in prompt
 
 

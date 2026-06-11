@@ -21,17 +21,31 @@ Do not include private reasoning or raw tool transcripts unless they are necessa
 
 Kanboard tool use:
 - Use the available Kanboard tools instead of inventing text commands.
-- Handoff work to another agent with add_subtask when a separable follow-up should be handled by a roster member. Use a clear title and set assignee to the exact Kanboard username from the roster when a clear owner exists, including yourself when appropriate.
-- Manage shared files with list_attachments, get_attachment, upload_attachment, and delete_attachment. Download attachments before relying on their contents. Upload generated files, logs, patches, reports, or other artifacts that the user or another agent should inspect. Delete attachments only when the task explicitly asks for removal.
-- Share links, attachment references, and coordination notes with add_comment. Use comments for URLs, file paths, artifact summaries, or handoff context that should be visible to the user and other agents before your final response.
+- Handoff work to another agent with add_subtask when a separable follow-up should be handled by a roster
+  member. Use a clear title and set assignee to the exact Kanboard username from the roster when a clear
+  owner exists, including yourself when appropriate.
+- Manage shared files with list_attachments, get_attachment, upload_attachment, and delete_attachment.
+  Download attachments before relying on their contents. Upload generated files, logs, patches, reports,
+  or other artifacts that the user or another agent should inspect. Delete attachments only when the task
+  explicitly asks for removal.
+- Share links, attachment references, and coordination notes with add_comment. Use comments for URLs,
+  file paths, artifact summaries, or handoff context that should be visible to the user and other agents
+  before your final response.
 - Use move_column only for intentional workflow routing between configured columns.
 
 Column policy:
-- todo: return the card to the queue only when explicitly asked to requeue it or when no active work should continue right now. Do not move to todo just because you created subtasks; the worker returns parent cards with pending subtasks to todo after your turn.
-- working: the worker normally puts claimed cards here. Move to working only when correcting a card that is in the wrong column while active work continues.
-- blocked: move here when progress requires a human decision, missing credentials, unavailable dependency, reproducible failure outside your control, or another blocker you cannot resolve in this turn.
-- done: move here only when the card's requested work is complete and there are no pending subtasks. For ordinary successful top-level task completion, you may leave the card in place; the worker will move it to done automatically.
-For subtasks, complete the subtask work and report the result in your final response. Do not move the parent task unless the parent itself needs a workflow change."""
+- todo: return the card to the queue only when explicitly asked to requeue it or when no active work should
+  continue right now. Do not move to todo just because you created subtasks; the worker returns parent cards
+  with pending subtasks to todo after your turn.
+- working: the worker normally puts claimed cards here. Move to working only when correcting a card that is
+  in the wrong column while active work continues.
+- blocked: move here when progress requires a human decision, missing credentials, unavailable dependency,
+  reproducible failure outside your control, or another blocker you cannot resolve in this turn.
+- done: move here only when the card's requested work is complete and there are no pending subtasks. For
+  ordinary successful top-level task completion, you may leave the card in place; the worker will move it
+  to done automatically.
+For subtasks, complete the subtask work and report the result in your final response. Do not move the parent
+task unless the parent itself needs a workflow change."""
 
 AGENT_PROMPT_TEMPLATE = Environment(
     autoescape=False,

@@ -50,7 +50,7 @@ class Worker:
         self._user_id = user_id
 
     @classmethod
-    def from_config(cls, config: AppConfig) -> "Worker":
+    def from_config(cls, config: AppConfig) -> Worker:
         """Build a production worker from config, resolving its Kanboard user id once."""
 
         user = get_me_sync(config.server.url, config.server.user, config.server.token)
