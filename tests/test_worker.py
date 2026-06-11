@@ -109,6 +109,9 @@ def test_worker_comments_when_claiming_task(tmp_path: Path) -> None:
         async def get_all_subtasks(self, task_id):
             return []
 
+        async def get_all_task_links(self, task_id):
+            return []
+
         async def move_task_to_column(self, project_id, task_id, column_id, swimlane_id=0):
             moves.append((project_id, task_id, column_id, swimlane_id))
 
@@ -294,6 +297,9 @@ def test_worker_skips_top_level_tasks_with_pending_subtasks(tmp_path: Path) -> N
                 return [{"id": "99", "task_id": "42", "title": "Pending", "user_id": 0, "status": 0}]
             return []
 
+        async def get_all_task_links(self, task_id):
+            return []
+
         async def move_task_to_column(self, project_id, task_id, column_id, swimlane_id=0):
             moves.append((project_id, task_id, column_id, swimlane_id))
 
@@ -310,6 +316,121 @@ def test_worker_skips_top_level_tasks_with_pending_subtasks(tmp_path: Path) -> N
     assert claimed is not None
     assert claimed.task["id"] == "43"
     assert moves == [(1, "43", 2, 8)]
+
+
+def test_worker_skips_ready_tasks_blocked_by_active_internal_links(tmp_path: Path) -> None:
+    moves = []
+    comments = []
+    task_link_calls = []
+
+    class FakeClient:
+        async def get_columns(self, project_id):
+            return [
+                {"id": 1, "title": "Ready"},
+                {"id": 2, "title": "In Progress"},
+                {"id": 3, "title": "Done"},
+                {"id": 4, "title": "Blocked"},
+            ]
+
+        async def get_board(self, project_id):
+            return [
+                {
+                    "columns": [
+                        {
+                            "id": 1,
+                            "tasks": [
+                                {"id": "42", "assignee_username": "codex-node1", "swimlane_id": 8},
+                                {"id": "43", "assignee_username": "codex-node1", "swimlane_id": 8},
+                            ],
+                        },
+                        {"id": 2, "tasks": []},
+                        {"id": 4, "tasks": []},
+                    ]
+                }
+            ]
+
+        async def get_all_subtasks(self, task_id):
+            return []
+
+        async def get_all_task_links(self, task_id):
+            task_link_calls.append(task_id)
+            if task_id == "42":
+                return [
+                    {
+                        "task_id": "41",
+                        "label": "is blocked by",
+                        "column_title": "In Progress",
+                    }
+                ]
+            return []
+
+        async def move_task_to_column(self, project_id, task_id, column_id, swimlane_id=0):
+            moves.append((project_id, task_id, column_id, swimlane_id))
+
+        async def create_comment(self, task_id, user_id, comment):
+            comments.append((task_id, user_id, comment))
+
+        async def get_task(self, task_id):
+            return {"id": task_id, "assignee_username": "codex-node1", "swimlane_id": 8}
+
+    worker = Worker(_config(tmp_path), client=FakeClient(), user_id=9)
+
+    claimed = asyncio.run(worker.claim_next_available())
+
+    assert claimed is not None
+    assert claimed.task["id"] == "43"
+    assert task_link_calls == ["42", "43"]
+    assert moves == [(1, "43", 2, 8)]
+    assert comments == [("43", 9, WORK_STARTED_COMMENT)]
+
+
+def test_worker_claims_ready_tasks_when_blocker_is_done(tmp_path: Path) -> None:
+    moves = []
+
+    class FakeClient:
+        async def get_columns(self, project_id):
+            return [
+                {"id": 1, "title": "Ready"},
+                {"id": 2, "title": "In Progress"},
+                {"id": 3, "title": "Done"},
+                {"id": 4, "title": "Blocked"},
+            ]
+
+        async def get_board(self, project_id):
+            return [
+                {
+                    "columns": [
+                        {
+                            "id": 1,
+                            "tasks": [{"id": "42", "assignee_username": "codex-node1", "swimlane_id": 8}],
+                        },
+                        {"id": 3, "tasks": []},
+                    ]
+                }
+            ]
+
+        async def get_all_subtasks(self, task_id):
+            return []
+
+        async def get_all_task_links(self, task_id):
+            return [{"task_id": "41", "label": "is blocked by", "column_title": "Done"}]
+
+        async def move_task_to_column(self, project_id, task_id, column_id, swimlane_id=0):
+            moves.append((project_id, task_id, column_id, swimlane_id))
+
+        async def create_comment(self, task_id, user_id, comment):
+            pass
+
+        async def get_task(self, task_id):
+            return {"id": task_id, "assignee_username": "codex-node1", "swimlane_id": 8}
+
+    worker = Worker(_config(tmp_path), client=FakeClient(), user_id=9)
+
+    claimed = asyncio.run(worker.claim_next_available())
+
+    assert claimed is not None
+    assert claimed.task["id"] == "42"
+    assert moves == [(1, "42", 2, 8)]
 
 
 def test_worker_iter_claimed_work_yields_until_no_work(tmp_path: Path) -> None:

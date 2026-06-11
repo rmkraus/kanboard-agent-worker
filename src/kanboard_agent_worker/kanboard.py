@@ -178,6 +178,12 @@ class KanboardClient:
             raise KanboardError(f"getAllSubtasks failed for task {task_id}")
         return result
 
+    async def get_all_task_links(self, task_id: int | str) -> list[dict[str, Any]]:
+        result = await self.call("getAllTaskLinks", [_coerce_id(task_id)])
+        if result is False or result is None:
+            raise KanboardError(f"getAllTaskLinks failed for task {task_id}")
+        return result
+
     async def get_all_task_files(self, task_id: int | str) -> list[dict[str, Any]]:
         result = await self.call("getAllTaskFiles", {"task_id": _coerce_id(task_id)})
         if result is False or result is None:
