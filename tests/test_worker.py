@@ -27,22 +27,24 @@ def test_worker_saves_changed_agent_thread_id(tmp_path: Path) -> None:
     saved = {}
 
     class FakeClient:
-        def get_task_metadata_by_name(self, task_id, name):
+        async def get_task_metadata_by_name(self, task_id, name):
             return ""
 
-        def save_task_metadata(self, task_id, values):
+        async def save_task_metadata(self, task_id, values):
             saved[task_id] = values
 
-    worker = Worker(_config(tmp_path), client=FakeClient())
+    worker = Worker(_config(tmp_path), client=FakeClient(), user_id=9)
 
-    worker._save_agent_thread_id(
-        ClaimedTask(
-            board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
-            task={"id": "42"},
-            done_column_id=3,
-            blocked_column_id=4,
+    asyncio.run(
+        worker._save_agent_thread_id(
+            ClaimedTask(
+                board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
+                task={"id": "42"},
+                done_column_id=3,
+                blocked_column_id=4,
+            ),
+            "thread-123",
         ),
-        "thread-123",
     )
 
     assert saved == {"42": {"kanboard_worker.codex-node1.thread_id": "thread-123"}}
@@ -52,13 +54,13 @@ def test_worker_returns_empty_thread_id_when_metadata_is_missing(tmp_path: Path)
     saved = {}
 
     class FakeClient:
-        def get_task_metadata_by_name(self, task_id, name):
+        async def get_task_metadata_by_name(self, task_id, name):
             return ""
 
-        def save_task_metadata(self, task_id, values):
+        async def save_task_metadata(self, task_id, values):
             saved[task_id] = values
 
-    worker = Worker(_config(tmp_path), client=FakeClient())
+    worker = Worker(_config(tmp_path), client=FakeClient(), user_id=9)
     claimed = ClaimedTask(
         board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
         task={"id": "42"},
@@ -67,7 +69,7 @@ def test_worker_returns_empty_thread_id_when_metadata_is_missing(tmp_path: Path)
     )
     metadata = {}
 
-    thread_id = worker._agent_thread_id(claimed, metadata)
+    thread_id = asyncio.run(worker._agent_thread_id(claimed, metadata))
 
     assert thread_id == ""
     assert metadata == {}
@@ -79,7 +81,7 @@ def test_worker_comments_when_claiming_task(tmp_path: Path) -> None:
     moves = []
 
     class FakeClient:
-        def get_columns(self, project_id):
+        async def get_columns(self, project_id):
             return [
                 {"id": 1, "title": "Ready"},
                 {"id": 2, "title": "In Progress"},
@@ -87,7 +89,7 @@ def test_worker_comments_when_claiming_task(tmp_path: Path) -> None:
                 {"id": 4, "title": "Blocked"},
             ]
 
-        def get_board(self, project_id):
+        async def get_board(self, project_id):
             return [
                 {
                     "columns": [
@@ -106,22 +108,21 @@ def test_worker_comments_when_claiming_task(tmp_path: Path) -> None:
                 }
             ]
 
-        def get_all_subtasks(self, task_id):
+        async def get_all_subtasks(self, task_id):
             return []
 
-        def move_task_to_column(self, project_id, task_id, column_id, swimlane_id=0):
+        async def move_task_to_column(self, project_id, task_id, column_id, swimlane_id=0):
             moves.append((project_id, task_id, column_id, swimlane_id))
 
-        def create_comment(self, task_id, user_id, comment):
+        async def create_comment(self, task_id, user_id, comment):
             comments.append((task_id, user_id, comment))
 
-        def get_task(self, task_id):
+        async def get_task(self, task_id):
             return {"id": task_id, "assignee_username": "codex-node1", "swimlane_id": 8}
 
-    worker = Worker(_config(tmp_path), client=FakeClient())
-    worker._user_id = 9
+    worker = Worker(_config(tmp_path), client=FakeClient(), user_id=9)
 
-    claimed = worker.claim_next_available()
+    claimed = asyncio.run(worker.claim_next_available())
 
     assert claimed is not None
     assert claimed.task["id"] == "42"
@@ -134,7 +135,7 @@ def test_worker_recovers_assigned_working_tasks_to_queue(tmp_path: Path) -> None
     moves = []
 
     class FakeClient:
-        def get_columns(self, project_id):
+        async def get_columns(self, project_id):
             return [
                 {"id": 1, "title": "Ready"},
                 {"id": 2, "title": "In Progress"},
@@ -142,7 +143,7 @@ def test_worker_recovers_assigned_working_tasks_to_queue(tmp_path: Path) -> None
                 {"id": 4, "title": "Blocked"},
             ]
 
-        def get_board(self, project_id):
+        async def get_board(self, project_id):
             return [
                 {
                     "columns": [
@@ -166,19 +167,18 @@ def test_worker_recovers_assigned_working_tasks_to_queue(tmp_path: Path) -> None
                 }
             ]
 
-        def get_all_subtasks(self, task_id):
+        async def get_all_subtasks(self, task_id):
             return []
 
-        def create_comment(self, task_id, user_id, comment):
+        async def create_comment(self, task_id, user_id, comment):
             comments.append((task_id, user_id, comment))
 
-        def move_task_to_column(self, project_id, task_id, column_id, swimlane_id=0):
+        async def move_task_to_column(self, project_id, task_id, column_id, swimlane_id=0):
             moves.append((project_id, task_id, column_id, swimlane_id))
 
-    worker = Worker(_config(tmp_path), client=FakeClient())
-    worker._user_id = 9
+    worker = Worker(_config(tmp_path), client=FakeClient(), user_id=9)
 
-    recovered = worker.recover_in_process_tasks()
+    recovered = asyncio.run(worker.recover_in_process_tasks())
 
     assert recovered == 1
     assert comments == [("42", 9, RECOVERY_COMMENT)]
@@ -191,7 +191,7 @@ def test_worker_claims_assigned_subtasks_before_tasks(tmp_path: Path) -> None:
     timers = []
 
     class FakeClient:
-        def get_columns(self, project_id):
+        async def get_columns(self, project_id):
             return [
                 {"id": 1, "title": "Ready"},
                 {"id": 2, "title": "In Progress"},
@@ -199,7 +199,7 @@ def test_worker_claims_assigned_subtasks_before_tasks(tmp_path: Path) -> None:
                 {"id": 4, "title": "Blocked"},
             ]
 
-        def get_board(self, project_id):
+        async def get_board(self, project_id):
             return [
                 {
                     "columns": [
@@ -229,27 +229,26 @@ def test_worker_claims_assigned_subtasks_before_tasks(tmp_path: Path) -> None:
                 }
             ]
 
-        def get_all_subtasks(self, task_id):
+        async def get_all_subtasks(self, task_id):
             if task_id == "42":
                 return [{"id": "99", "task_id": "42", "title": "Subtask work", "user_id": 9, "status": 0}]
             return []
 
-        def update_subtask(self, subtask_id, task_id, **values):
+        async def update_subtask(self, subtask_id, task_id, **values):
             subtask_updates.append((subtask_id, task_id, values))
 
-        def start_subtask_timer(self, subtask_id, user_id):
+        async def start_subtask_timer(self, subtask_id, user_id):
             timers.append((subtask_id, user_id))
 
-        def create_comment(self, task_id, user_id, comment):
+        async def create_comment(self, task_id, user_id, comment):
             comments.append((task_id, user_id, comment))
 
-        def get_task(self, task_id):
+        async def get_task(self, task_id):
             return {"id": task_id, "title": "Parent", "assignee_username": "someone-else", "swimlane_id": 8}
 
-    worker = Worker(_config(tmp_path), client=FakeClient())
-    worker._user_id = 9
+    worker = Worker(_config(tmp_path), client=FakeClient(), user_id=9)
 
-    claimed = worker.claim_next_available()
+    claimed = asyncio.run(worker.claim_next_available())
 
     assert claimed is not None
     assert claimed.subtask["id"] == "99"
@@ -268,7 +267,7 @@ def test_worker_skips_top_level_tasks_with_pending_subtasks(tmp_path: Path) -> N
     moves = []
 
     class FakeClient:
-        def get_columns(self, project_id):
+        async def get_columns(self, project_id):
             return [
                 {"id": 1, "title": "Ready"},
                 {"id": 2, "title": "In Progress"},
@@ -276,7 +275,7 @@ def test_worker_skips_top_level_tasks_with_pending_subtasks(tmp_path: Path) -> N
                 {"id": 4, "title": "Blocked"},
             ]
 
-        def get_board(self, project_id):
+        async def get_board(self, project_id):
             return [
                 {
                     "columns": [
@@ -292,24 +291,23 @@ def test_worker_skips_top_level_tasks_with_pending_subtasks(tmp_path: Path) -> N
                 }
             ]
 
-        def get_all_subtasks(self, task_id):
+        async def get_all_subtasks(self, task_id):
             if task_id == "42":
                 return [{"id": "99", "task_id": "42", "title": "Pending", "user_id": 0, "status": 0}]
             return []
 
-        def move_task_to_column(self, project_id, task_id, column_id, swimlane_id=0):
+        async def move_task_to_column(self, project_id, task_id, column_id, swimlane_id=0):
             moves.append((project_id, task_id, column_id, swimlane_id))
 
-        def create_comment(self, task_id, user_id, comment):
+        async def create_comment(self, task_id, user_id, comment):
             pass
 
-        def get_task(self, task_id):
+        async def get_task(self, task_id):
             return {"id": task_id, "assignee_username": "codex-node1", "swimlane_id": 8}
 
-    worker = Worker(_config(tmp_path), client=FakeClient())
-    worker._user_id = 9
+    worker = Worker(_config(tmp_path), client=FakeClient(), user_id=9)
 
-    claimed = worker.claim_next_available()
+    claimed = asyncio.run(worker.claim_next_available())
 
     assert claimed is not None
     assert claimed.task["id"] == "43"
@@ -328,11 +326,18 @@ def test_worker_iter_claimed_work_yields_until_no_work(tmp_path: Path) -> None:
     class FakePool:
         is_full = False
 
+    class FakeClient:
+        pass
+
     async def collect() -> list[ClaimedTask]:
         return [item async for item in worker.iter_claimed_work(FakePool())]
 
-    worker = Worker(_config(tmp_path), client=object())
-    worker.claim_next_available = lambda: claims.pop(0) if claims else None
+    worker = Worker(_config(tmp_path), client=FakeClient(), user_id=9)
+
+    async def claim_next_available() -> ClaimedTask | None:
+        return claims.pop(0) if claims else None
+
+    worker.claim_next_available = claim_next_available
 
     assert asyncio.run(collect()) == [claim]
 
@@ -344,32 +349,31 @@ def test_worker_respects_card_move_done_by_agent_tool(tmp_path: Path) -> None:
     descriptions = []
 
     class FakeClient:
-        def get_all_comments(self, task_id):
+        async def get_all_comments(self, task_id):
             return []
 
-        def get_task_metadata(self, task_id):
+        async def get_task_metadata(self, task_id):
             return {key: "thread-123"}
 
-        def create_comment(self, task_id, user_id, comment):
+        async def create_comment(self, task_id, user_id, comment):
             comments.append(comment)
 
-        def get_task_metadata_by_name(self, task_id, name):
+        async def get_task_metadata_by_name(self, task_id, name):
             return "thread-123"
 
-        def save_task_metadata(self, task_id, values):
+        async def save_task_metadata(self, task_id, values):
             raise AssertionError("existing thread id should not be saved again")
 
-        def update_task_description(self, task_id, description):
+        async def update_task_description(self, task_id, description):
             descriptions.append(description)
 
-        def move_task_to_column(self, project_id, task_id, column_id, swimlane_id=0):
+        async def move_task_to_column(self, project_id, task_id, column_id, swimlane_id=0):
             moves.append(column_id)
 
-        def get_task(self, task_id):
+        async def get_task(self, task_id):
             return {"id": task_id, "column_id": 4, "assignee_username": "codex-node1", "swimlane_id": 8}
 
-    worker = Worker(_config(tmp_path), client=FakeClient())
-    worker._user_id = 9
+    worker = Worker(_config(tmp_path), client=FakeClient(), user_id=9)
     _install_fake_acp_session(worker, text="Need a human answer before I can continue.")
     claimed = ClaimedTask(
         board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
@@ -392,32 +396,31 @@ def test_worker_does_not_complete_parent_when_agent_tool_created_pending_subtask
     key = thread_metadata_key("codex-node1")
 
     class FakeClient:
-        def get_all_comments(self, task_id):
+        async def get_all_comments(self, task_id):
             return []
 
-        def get_task_metadata(self, task_id):
+        async def get_task_metadata(self, task_id):
             return {key: "thread-123"}
 
-        def create_comment(self, task_id, user_id, comment):
+        async def create_comment(self, task_id, user_id, comment):
             comments.append(comment)
 
-        def get_task_metadata_by_name(self, task_id, name):
+        async def get_task_metadata_by_name(self, task_id, name):
             return "thread-123"
 
-        def save_task_metadata(self, task_id, values):
+        async def save_task_metadata(self, task_id, values):
             raise AssertionError("existing thread id should not be saved again")
 
-        def update_task_description(self, task_id, description):
+        async def update_task_description(self, task_id, description):
             descriptions.append(description)
 
-        def move_task_to_column(self, project_id, task_id, column_id, swimlane_id=0):
+        async def move_task_to_column(self, project_id, task_id, column_id, swimlane_id=0):
             moves.append(column_id)
 
-        def get_all_subtasks(self, task_id):
+        async def get_all_subtasks(self, task_id):
             return [{"id": "101", "task_id": "42", "title": "Follow-up", "user_id": 11, "status": 0}]
 
-    worker = Worker(_config(tmp_path), client=FakeClient())
-    worker._user_id = 9
+    worker = Worker(_config(tmp_path), client=FakeClient(), user_id=9)
     _install_fake_acp_session(worker, text="Split this into follow-up work and created a subtask.")
     claimed = ClaimedTask(
         board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
@@ -441,32 +444,31 @@ def test_worker_completes_subtask_and_comments_on_parent(tmp_path: Path) -> None
     key = thread_metadata_key("codex-node1", "99")
 
     class FakeClient:
-        def get_all_comments(self, task_id):
+        async def get_all_comments(self, task_id):
             return []
 
-        def get_task_metadata(self, task_id):
+        async def get_task_metadata(self, task_id):
             return {key: "thread-123"}
 
-        def create_comment(self, task_id, user_id, comment):
+        async def create_comment(self, task_id, user_id, comment):
             comments.append((task_id, user_id, comment))
 
-        def get_task_metadata_by_name(self, task_id, name):
+        async def get_task_metadata_by_name(self, task_id, name):
             return "thread-123"
 
-        def save_task_metadata(self, task_id, values):
+        async def save_task_metadata(self, task_id, values):
             raise AssertionError("existing thread id should not be saved again")
 
-        def has_subtask_timer(self, subtask_id, user_id):
+        async def has_subtask_timer(self, subtask_id, user_id):
             return True
 
-        def stop_subtask_timer(self, subtask_id, user_id):
+        async def stop_subtask_timer(self, subtask_id, user_id):
             stopped_timers.append((subtask_id, user_id))
 
-        def update_subtask(self, subtask_id, task_id, **values):
+        async def update_subtask(self, subtask_id, task_id, **values):
             updates.append((subtask_id, task_id, values))
 
-    worker = Worker(_config(tmp_path), client=FakeClient())
-    worker._user_id = 9
+    worker = Worker(_config(tmp_path), client=FakeClient(), user_id=9)
     _install_fake_acp_session(
         worker,
         text="Subtask complete.",

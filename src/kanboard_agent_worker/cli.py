@@ -28,10 +28,10 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         config = load_config(args.config)
-        worker = Worker(config)
+        worker = Worker.from_config(config)
 
         if args.command == "check":
-            for line in worker.check():
+            for line in asyncio.run(_check(worker)):
                 print(line)
             return 0
         if args.command == "run":
@@ -45,3 +45,12 @@ def main(argv: list[str] | None = None) -> int:
         return 130
 
     return 2
+
+
+async def _check(worker: Worker) -> list[str]:
+    """Run the async check command and close client resources."""
+
+    try:
+        return await worker.check()
+    finally:
+        await worker.close()

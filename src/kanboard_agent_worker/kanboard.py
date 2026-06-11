@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import itertools
 import base64
-import time
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
-import requests
+import httpx
 
 
 class KanboardError(RuntimeError):
@@ -44,10 +44,24 @@ class KanboardClient:
         self.retry_attempts = retry_attempts
         self.retry_delay_seconds = retry_delay_seconds
         self._ids = itertools.count(1)
-        self.session = requests.Session()
-        self.session.auth = (user, token)
+        self.session = httpx.AsyncClient(auth=(user, token), timeout=timeout)
 
-    def call(self, method: str, params: Any | None = None) -> Any:
+    async def close(self) -> None:
+        """Close the underlying HTTP client connection pool."""
+
+        await self.session.aclose()
+
+    async def __aenter__(self) -> "KanboardClient":
+        """Return this client for async context manager use."""
+
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        """Close the HTTP client when leaving an async context."""
+
+        await self.close()
+
+    async def call(self, method: str, params: Any | None = None) -> Any:
         """Call a Kanboard JSON-RPC method and return its result value."""
 
         payload: dict[str, Any] = {
@@ -59,12 +73,12 @@ class KanboardClient:
             payload["params"] = params
 
         for attempt in range(1, self.retry_attempts + 1):
-            response = self.session.post(self.endpoint, json=payload, timeout=self.timeout)
+            response = await self.session.post(self.endpoint, json=payload)
             try:
                 response.raise_for_status()
-            except requests.HTTPError as exc:
+            except httpx.HTTPStatusError as exc:
                 if _is_database_locked_error(response.text) and attempt < self.retry_attempts:
-                    self._sleep_before_retry(attempt)
+                    await self._sleep_before_retry(attempt)
                     continue
                 raise KanboardError(f"Kanboard HTTP {response.status_code}: {response.text}") from exc
 
@@ -72,54 +86,56 @@ class KanboardClient:
             if "error" in data:
                 error = data["error"]
                 if _is_database_locked_error(error) and attempt < self.retry_attempts:
-                    self._sleep_before_retry(attempt)
+                    await self._sleep_before_retry(attempt)
                     continue
                 raise KanboardError(f"Kanboard JSON-RPC error in {method}: {error}")
             return data.get("result")
 
         raise KanboardError(f"Kanboard JSON-RPC retry attempts exhausted in {method}")
 
-    def _sleep_before_retry(self, attempt: int) -> None:
-        time.sleep(self.retry_delay_seconds * attempt)
+    async def _sleep_before_retry(self, attempt: int) -> None:
+        """Wait before retrying a transient Kanboard database lock."""
 
-    def get_me(self) -> dict[str, Any]:
-        result = self.call("getMe")
+        await asyncio.sleep(self.retry_delay_seconds * attempt)
+
+    async def get_me(self) -> dict[str, Any]:
+        result = await self.call("getMe")
         if not result:
             raise KanboardError("getMe returned no user data")
         return result
 
-    def get_board(self, project_id: int | str) -> list[dict[str, Any]]:
-        result = self.call("getBoard", [_coerce_id(project_id)])
+    async def get_board(self, project_id: int | str) -> list[dict[str, Any]]:
+        result = await self.call("getBoard", [_coerce_id(project_id)])
         if result is False or result is None:
             raise KanboardError(f"getBoard failed for project {project_id}")
         return result
 
-    def get_columns(self, project_id: int | str) -> list[dict[str, Any]]:
-        result = self.call("getColumns", [_coerce_id(project_id)])
+    async def get_columns(self, project_id: int | str) -> list[dict[str, Any]]:
+        result = await self.call("getColumns", [_coerce_id(project_id)])
         if result is False or result is None:
             raise KanboardError(f"getColumns failed for project {project_id}")
         return result
 
-    def get_task(self, task_id: int | str) -> dict[str, Any]:
-        result = self.call("getTask", {"task_id": _coerce_id(task_id)})
+    async def get_task(self, task_id: int | str) -> dict[str, Any]:
+        result = await self.call("getTask", {"task_id": _coerce_id(task_id)})
         if not result:
             raise KanboardError(f"getTask failed for task {task_id}")
         return result
 
-    def get_user_by_name(self, username: str) -> dict[str, Any]:
-        result = self.call("getUserByName", {"username": username})
+    async def get_user_by_name(self, username: str) -> dict[str, Any]:
+        result = await self.call("getUserByName", {"username": username})
         if not result:
             raise KanboardError(f"getUserByName failed for user {username!r}")
         return result
 
-    def get_all_comments(self, task_id: int | str) -> list[dict[str, Any]]:
-        result = self.call("getAllComments", {"task_id": _coerce_id(task_id)})
+    async def get_all_comments(self, task_id: int | str) -> list[dict[str, Any]]:
+        result = await self.call("getAllComments", {"task_id": _coerce_id(task_id)})
         if result is False or result is None:
             raise KanboardError(f"getAllComments failed for task {task_id}")
         return result
 
-    def create_comment(self, task_id: int | str, user_id: int | str, content: str) -> int:
-        result = self.call(
+    async def create_comment(self, task_id: int | str, user_id: int | str, content: str) -> int:
+        result = await self.call(
             "createComment",
             {
                 "task_id": _coerce_id(task_id),
@@ -131,13 +147,13 @@ class KanboardClient:
             raise KanboardError(f"createComment failed for task {task_id}")
         return int(result)
 
-    def update_task_description(self, task_id: int | str, description: str) -> None:
-        result = self.call("updateTask", {"id": _coerce_id(task_id), "description": description})
+    async def update_task_description(self, task_id: int | str, description: str) -> None:
+        result = await self.call("updateTask", {"id": _coerce_id(task_id), "description": description})
         if result is not True:
             raise KanboardError(f"updateTask failed for task {task_id}")
 
-    def get_task_metadata(self, task_id: int | str) -> dict[str, str]:
-        result = self.call("getTaskMetadata", [_coerce_id(task_id)])
+    async def get_task_metadata(self, task_id: int | str) -> dict[str, str]:
+        result = await self.call("getTaskMetadata", [_coerce_id(task_id)])
         if result is False or result is None:
             return {}
         if isinstance(result, dict):
@@ -150,37 +166,37 @@ class KanboardClient:
             return metadata
         return {}
 
-    def get_task_metadata_by_name(self, task_id: int | str, name: str) -> str:
-        result = self.call("getTaskMetadataByName", [_coerce_id(task_id), name])
+    async def get_task_metadata_by_name(self, task_id: int | str, name: str) -> str:
+        result = await self.call("getTaskMetadataByName", [_coerce_id(task_id), name])
         if result is False or result is None:
             return ""
         return str(result)
 
-    def save_task_metadata(self, task_id: int | str, values: dict[str, str]) -> None:
-        result = self.call("saveTaskMetadata", [_coerce_id(task_id), values])
+    async def save_task_metadata(self, task_id: int | str, values: dict[str, str]) -> None:
+        result = await self.call("saveTaskMetadata", [_coerce_id(task_id), values])
         if result is not True:
             raise KanboardError(f"saveTaskMetadata failed for task {task_id}")
 
-    def get_all_subtasks(self, task_id: int | str) -> list[dict[str, Any]]:
-        result = self.call("getAllSubtasks", {"task_id": _coerce_id(task_id)})
+    async def get_all_subtasks(self, task_id: int | str) -> list[dict[str, Any]]:
+        result = await self.call("getAllSubtasks", {"task_id": _coerce_id(task_id)})
         if result is False or result is None:
             raise KanboardError(f"getAllSubtasks failed for task {task_id}")
         return result
 
-    def get_all_task_files(self, task_id: int | str) -> list[dict[str, Any]]:
-        result = self.call("getAllTaskFiles", {"task_id": _coerce_id(task_id)})
+    async def get_all_task_files(self, task_id: int | str) -> list[dict[str, Any]]:
+        result = await self.call("getAllTaskFiles", {"task_id": _coerce_id(task_id)})
         if result is False or result is None:
             raise KanboardError(f"getAllTaskFiles failed for task {task_id}")
         return result
 
-    def download_task_file(self, file_id: int | str) -> bytes:
-        result = self.call("downloadTaskFile", {"file_id": _coerce_id(file_id)})
+    async def download_task_file(self, file_id: int | str) -> bytes:
+        result = await self.call("downloadTaskFile", {"file_id": _coerce_id(file_id)})
         if result is False or result is None:
             raise KanboardError(f"downloadTaskFile failed for file {file_id}")
         return base64.b64decode(str(result))
 
-    def create_task_file(self, project_id: int | str, task_id: int | str, filename: str, content: bytes) -> int:
-        result = self.call(
+    async def create_task_file(self, project_id: int | str, task_id: int | str, filename: str, content: bytes) -> int:
+        result = await self.call(
             "createTaskFile",
             {
                 "project_id": _coerce_id(project_id),
@@ -193,19 +209,19 @@ class KanboardClient:
             raise KanboardError(f"createTaskFile failed for task {task_id}")
         return int(result)
 
-    def remove_task_file(self, file_id: int | str) -> None:
-        result = self.call("removeTaskFile", {"file_id": _coerce_id(file_id)})
+    async def remove_task_file(self, file_id: int | str) -> None:
+        result = await self.call("removeTaskFile", {"file_id": _coerce_id(file_id)})
         if result is not True:
             raise KanboardError(f"removeTaskFile failed for file {file_id}")
 
-    def create_subtask(
+    async def create_subtask(
         self,
         task_id: int | str,
         title: str,
         user_id: int | str = 0,
         status: int = 0,
     ) -> int:
-        result = self.call(
+        result = await self.call(
             "createSubtask",
             {
                 "task_id": _coerce_id(task_id),
@@ -218,7 +234,7 @@ class KanboardClient:
             raise KanboardError(f"createSubtask failed for task {task_id}")
         return int(result)
 
-    def update_subtask(
+    async def update_subtask(
         self,
         subtask_id: int | str,
         task_id: int | str,
@@ -238,24 +254,24 @@ class KanboardClient:
         if status is not None:
             params["status"] = status
 
-        result = self.call("updateSubtask", params)
+        result = await self.call("updateSubtask", params)
         if result is not True:
             raise KanboardError(f"updateSubtask failed for subtask {subtask_id}")
 
-    def has_subtask_timer(self, subtask_id: int | str, user_id: int | str) -> bool:
-        return bool(self.call("hasSubtaskTimer", [_coerce_id(subtask_id), _coerce_id(user_id)]))
+    async def has_subtask_timer(self, subtask_id: int | str, user_id: int | str) -> bool:
+        return bool(await self.call("hasSubtaskTimer", [_coerce_id(subtask_id), _coerce_id(user_id)]))
 
-    def start_subtask_timer(self, subtask_id: int | str, user_id: int | str) -> None:
-        result = self.call("setSubtaskStartTime", [_coerce_id(subtask_id), _coerce_id(user_id)])
+    async def start_subtask_timer(self, subtask_id: int | str, user_id: int | str) -> None:
+        result = await self.call("setSubtaskStartTime", [_coerce_id(subtask_id), _coerce_id(user_id)])
         if result is not True:
             raise KanboardError(f"setSubtaskStartTime failed for subtask {subtask_id}")
 
-    def stop_subtask_timer(self, subtask_id: int | str, user_id: int | str) -> None:
-        result = self.call("setSubtaskEndTime", [_coerce_id(subtask_id), _coerce_id(user_id)])
+    async def stop_subtask_timer(self, subtask_id: int | str, user_id: int | str) -> None:
+        result = await self.call("setSubtaskEndTime", [_coerce_id(subtask_id), _coerce_id(user_id)])
         if result is not True:
             raise KanboardError(f"setSubtaskEndTime failed for subtask {subtask_id}")
 
-    def move_task_to_column(
+    async def move_task_to_column(
         self,
         project_id: int | str,
         task_id: int | str,
@@ -263,7 +279,7 @@ class KanboardClient:
         swimlane_id: int | str = 0,
         position: int = 1,
     ) -> None:
-        result = self.call(
+        result = await self.call(
             "moveTaskPosition",
             {
                 "project_id": _coerce_id(project_id),
@@ -275,6 +291,30 @@ class KanboardClient:
         )
         if result is not True:
             raise KanboardError(f"moveTaskPosition failed for task {task_id}")
+
+
+def get_me_sync(
+    url: str,
+    user: str,
+    token: str,
+    timeout: int = 30,
+    retry_attempts: int = 8,
+    retry_delay_seconds: float = 0.25,
+) -> dict[str, Any]:
+    """Resolve the authenticated Kanboard user through a short async client run."""
+
+    async def load() -> dict[str, Any]:
+        async with KanboardClient(
+            url,
+            user,
+            token,
+            timeout=timeout,
+            retry_attempts=retry_attempts,
+            retry_delay_seconds=retry_delay_seconds,
+        ) as client:
+            return await client.get_me()
+
+    return asyncio.run(load())
 
 
 def normalize_endpoint(url: str) -> str:
