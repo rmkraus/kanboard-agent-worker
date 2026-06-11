@@ -60,7 +60,7 @@ class AcpSession:
     def __init__(
         self,
         *,
-        client: _KanboardAcpClient,
+        client: _AcpClient,
         command: tuple[str, ...],
         conn: Any,
         proc: asyncio.subprocess.Process,
@@ -91,7 +91,7 @@ class AcpSession:
 
         command = cls._command_for_config(config)
         root = Path(config.pwd).resolve()
-        client = _KanboardAcpClient(root)
+        client = _AcpClient(root)
         proc = await asyncio.create_subprocess_exec(
             command[0],
             *command[1:],
@@ -247,7 +247,7 @@ class AcpSession:
         )
 
 
-class _KanboardAcpClient(Client):
+class _AcpClient(Client):
     """ACP client callbacks for filesystem, terminal, and session updates."""
 
     def __init__(self, root: Path) -> None:
