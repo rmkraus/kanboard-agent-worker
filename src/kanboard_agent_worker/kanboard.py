@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,11 +27,21 @@ class ColumnLookup:
 class KanboardClient:
     """Small Kanboard JSON-RPC client using user/PAT HTTP Basic auth."""
 
-    def __init__(self, url: str, user: str, token: str, timeout: int = 30) -> None:
+    def __init__(
+        self,
+        url: str,
+        user: str,
+        token: str,
+        timeout: int = 30,
+        retry_attempts: int = 8,
+        retry_delay_seconds: float = 0.25,
+    ) -> None:
         self.endpoint = normalize_endpoint(url)
         self.user = user
         self.token = token
         self.timeout = timeout
+        self.retry_attempts = retry_attempts
+        self.retry_delay_seconds = retry_delay_seconds
         self._ids = itertools.count(1)
         self.session = requests.Session()
         self.session.auth = (user, token)
@@ -46,17 +57,29 @@ class KanboardClient:
         if params is not None:
             payload["params"] = params
 
-        response = self.session.post(self.endpoint, json=payload, timeout=self.timeout)
-        try:
-            response.raise_for_status()
-        except requests.HTTPError as exc:
-            raise KanboardError(f"Kanboard HTTP {response.status_code}: {response.text}") from exc
+        for attempt in range(1, self.retry_attempts + 1):
+            response = self.session.post(self.endpoint, json=payload, timeout=self.timeout)
+            try:
+                response.raise_for_status()
+            except requests.HTTPError as exc:
+                if _is_database_locked_error(response.text) and attempt < self.retry_attempts:
+                    self._sleep_before_retry(attempt)
+                    continue
+                raise KanboardError(f"Kanboard HTTP {response.status_code}: {response.text}") from exc
 
-        data = response.json()
-        if "error" in data:
-            error = data["error"]
-            raise KanboardError(f"Kanboard JSON-RPC error in {method}: {error}")
-        return data.get("result")
+            data = response.json()
+            if "error" in data:
+                error = data["error"]
+                if _is_database_locked_error(error) and attempt < self.retry_attempts:
+                    self._sleep_before_retry(attempt)
+                    continue
+                raise KanboardError(f"Kanboard JSON-RPC error in {method}: {error}")
+            return data.get("result")
+
+        raise KanboardError(f"Kanboard JSON-RPC retry attempts exhausted in {method}")
+
+    def _sleep_before_retry(self, attempt: int) -> None:
+        time.sleep(self.retry_delay_seconds * attempt)
 
     def get_me(self) -> dict[str, Any]:
         result = self.call("getMe")
@@ -186,3 +209,9 @@ def _coerce_id(value: int | str) -> int | str:
     if isinstance(value, str) and value.isdigit():
         return int(value)
     return value
+
+
+def _is_database_locked_error(value: Any) -> bool:
+    if isinstance(value, dict):
+        value = value.get("message", "")
+    return "database is locked" in str(value).casefold()

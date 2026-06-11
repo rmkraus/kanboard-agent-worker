@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kanboard_agent_worker.kanboard import KanboardClient, column_lookup, normalize_endpoint
+from kanboard_agent_worker.kanboard import KanboardClient, _is_database_locked_error, column_lookup, normalize_endpoint
 
 
 def test_normalize_endpoint_appends_jsonrpc_path() -> None:
@@ -55,3 +55,9 @@ def test_task_metadata_methods_call_expected_rpc() -> None:
         ("getTaskMetadataByName", [12, "kanboard_worker.codex-node1.thread_id"]),
         ("saveTaskMetadata", [12, {"kanboard_worker.codex-node1.thread_id": "thread-123"}]),
     ]
+
+
+def test_database_locked_error_detection() -> None:
+    assert _is_database_locked_error({"message": "SQLSTATE[HY000]: General error: 5 database is locked"})
+    assert _is_database_locked_error("SQL Error: database is locked")
+    assert not _is_database_locked_error({"message": "Unauthorized"})
