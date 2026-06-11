@@ -11,7 +11,7 @@ from typing import Any
 from acp.schema import PromptResponse
 from asyncio_pool import AioPool
 
-from .agents import AcpSession, AcpSessionError
+from .chat import AcpSession, AcpSessionError
 from .config import AppConfig, BoardConfig
 from .kanboard import KanboardClient, KanboardError, column_lookup, get_me_sync
 from .task_markdown import build_agent_prompt
@@ -285,9 +285,11 @@ class Worker:
                 # agent has already moved its own card, leave it alone
                 return
             elif await self._task_has_pending_subtasks(task):
+                # there are pending subtasks, requeue the task
                 await self._move_task_to_column(claimed, claimed.todo_column_id)
                 return
             else:
+                # task completed, move to done
                 await self._move_task_to_column(claimed, claimed.done_column_id)
         except (AcpSessionError, KanboardError, Exception) as exc:
             if claimed.subtask:

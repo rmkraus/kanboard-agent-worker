@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from kanboard_agent_worker.agents import AcpSession, AcpSessionError
+from kanboard_agent_worker.chat import AcpSession, AcpSessionError
 from kanboard_agent_worker.config import AgentConfig, AppConfig, BoardConfig, ServerConfig, WorkerSettings
 
 

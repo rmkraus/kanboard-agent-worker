@@ -12,7 +12,7 @@ from mcp.server.fastmcp import FastMCP
 from .kanboard import KanboardClient, KanboardError
 
 TOOL_INSTRUCTIONS = """Kanboard task tools. Use these tools for task files,
-subtasks, and moving cards between configured board columns."""
+task comments, subtasks, and moving cards between configured board columns."""
 
 mcp = FastMCP("kanboard", instructions=TOOL_INSTRUCTIONS)
 
@@ -87,6 +87,16 @@ async def upload_attachment(project_id: int, task_id: int, path: str, filename: 
     async with _client() as client:
         file_id = await client.create_task_file(project_id, task_id, filename or source.name, source.read_bytes())
     return {"file_id": file_id, "task_id": task_id, "filename": filename or source.name}
+
+
+@mcp.tool()
+async def add_comment(task_id: int, comment: str) -> dict[str, Any]:
+    """Add a comment to a Kanboard task as the authenticated worker user."""
+
+    async with _client() as client:
+        user = await client.get_me()
+        comment_id = await client.create_comment(task_id, user["id"], comment)
+    return {"comment_id": comment_id, "task_id": task_id}
 
 
 @mcp.tool()

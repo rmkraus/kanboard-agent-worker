@@ -42,7 +42,7 @@ from acp.schema import (
     WriteTextFileResponse,
 )
 
-from ..config import AgentConfig, AppConfig, BoardConfig
+from .config import AgentConfig, AppConfig, BoardConfig
 
 DEFAULT_ACP_COMMANDS = {
     "codex": "codex-acp",
@@ -52,6 +52,215 @@ DEFAULT_ACP_COMMANDS = {
 
 class AcpSessionError(RuntimeError):
     """Raised when an ACP subprocess, connection, or prompt turn fails."""
+
+
+class _AcpClient(Client):
+    """ACP client callbacks for filesystem, terminal, and session updates."""
+
+    def __init__(self, root: Path) -> None:
+        """Create callback state rooted at the configured agent directory."""
+
+        self.root = root.resolve()
+        self._messages: list[str] = []
+        self.terminals: dict[str, TerminalState] = {}
+
+    async def session_update(
+        self,
+        session_id: str,
+        update: UserMessageChunk
+        | AgentMessageChunk
+        | AgentThoughtChunk
+        | ToolCallStart
+        | ToolCallProgress
+        | AgentPlanUpdate
+        | AvailableCommandsUpdate
+        | CurrentModeUpdate
+        | ConfigOptionUpdate
+        | SessionInfoUpdate
+        | UsageUpdate,
+        **kwargs: Any,
+    ) -> None:
+        """Record agent message chunks emitted by the ACP server."""
+
+        if isinstance(update, AgentMessageChunk) and isinstance(
+            update.content, TextContentBlock
+        ):
+            self._messages.append(update.content.text)
+
+    async def read_text_file(
+        self,
+        path: str,
+        session_id: str,
+        limit: int | None = None,
+        line: int | None = None,
+        **kwargs: Any,
+    ) -> ReadTextFileResponse:
+        """Read a UTF-8 file from inside the configured agent directory."""
+
+        target = self._path(path)
+        text = target.read_text(encoding="utf-8")
+        if line is not None:
+            text = "\n".join(text.splitlines()[max(0, line - 1) :])
+        if limit is not None:
+            text = text[:limit]
+        return ReadTextFileResponse(content=text)
+
+    async def write_text_file(
+        self, content: str, path: str, session_id: str, **kwargs: Any
+    ) -> WriteTextFileResponse:
+        """Write a UTF-8 file inside the configured agent directory."""
+
+        target = self._path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return WriteTextFileResponse()
+
+    async def create_terminal(
+        self,
+        command: str,
+        session_id: str,
+        args: list[str] | None = None,
+        cwd: str | None = None,
+        env: list[EnvVariable] | None = None,
+        output_byte_limit: int | None = None,
+        **kwargs: Any,
+    ) -> CreateTerminalResponse:
+        """Start a terminal command rooted inside the configured directory."""
+
+        terminal_id = str(uuid.uuid4())
+        run_env = os.environ.copy()
+        for item in env or []:
+            run_env[item.name] = item.value
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                command,
+                *(args or []),
+                cwd=str(self._path(cwd or ".")),
+                env=run_env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as exc:
+            raise RequestError.invalid_params(
+                {
+                    "message": f"Failed to start terminal command {command!r}",
+                    "error": str(exc),
+                }
+            ) from exc
+
+        output_task = asyncio.create_task(proc.communicate())
+        self.terminals[terminal_id] = TerminalState(
+            proc=proc,
+            output_task=output_task,
+            output_byte_limit=output_byte_limit,
+        )
+        return CreateTerminalResponse(terminal_id=terminal_id)
+
+    async def terminal_output(
+        self, session_id: str, terminal_id: str, **kwargs: Any
+    ) -> TerminalOutputResponse:
+        """Return buffered terminal output when the command has finished."""
+
+        state = self.terminals[terminal_id]
+        output = ""
+        truncated = False
+        if state.output_task.done():
+            output, truncated = _terminal_output(state)
+        return TerminalOutputResponse(
+            output=output,
+            truncated=truncated,
+            exit_status=_terminal_exit_status(state.proc.returncode),
+        )
+
+    async def wait_for_terminal_exit(
+        self,
+        session_id: str,
+        terminal_id: str,
+        **kwargs: Any,
+    ) -> WaitForTerminalExitResponse:
+        """Wait until a terminal command exits."""
+
+        state = self.terminals[terminal_id]
+        await state.output_task
+        if state.proc.returncode is not None and state.proc.returncode < 0:
+            return WaitForTerminalExitResponse(signal=str(-state.proc.returncode))
+        return WaitForTerminalExitResponse(exit_code=max(0, state.proc.returncode or 0))
+
+    async def release_terminal(
+        self,
+        session_id: str,
+        terminal_id: str,
+        **kwargs: Any,
+    ) -> ReleaseTerminalResponse | None:
+        """Forget a terminal command and stop it if it is still running."""
+
+        state = self.terminals.pop(terminal_id, None)
+        if state and state.proc.returncode is None:
+            state.proc.kill()
+            with contextlib.suppress(Exception):
+                await state.output_task
+        return ReleaseTerminalResponse()
+
+    async def kill_terminal(
+        self, session_id: str, terminal_id: str, **kwargs: Any
+    ) -> KillTerminalResponse | None:
+        """Kill a terminal command started by the ACP server."""
+
+        state = self.terminals.pop(terminal_id, None)
+        if state and state.proc.returncode is None:
+            state.proc.kill()
+            with contextlib.suppress(Exception):
+                await state.output_task
+        return KillTerminalResponse()
+
+    async def request_permission(self, *args, **kwargs):
+        """Reject unsupported ACP permission requests."""
+
+        raise RequestError.method_not_found("session/request_permission")
+
+    async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Reject unsupported ACP extension methods."""
+
+        raise RequestError.method_not_found(method)
+
+    async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
+        """Reject unsupported ACP extension notifications."""
+
+        raise RequestError.method_not_found(method)
+
+    def on_connect(self, conn: Any) -> None:
+        """Accept the ACP connection callback without keeping connection state."""
+
+        return None
+
+    def _agent_text(self) -> str:
+        """Return accumulated agent message text."""
+
+        return "".join(self._messages).strip()
+
+    def _clear_agent_text(self) -> None:
+        """Clear accumulated agent message text before a new prompt."""
+
+        self._messages.clear()
+
+    def _path(self, path: str) -> Path:
+        """Resolve a path and ensure it stays under the configured root."""
+
+        target = Path(path).expanduser()
+        if not target.is_absolute():
+            target = self.root / target
+        target = target.resolve()
+        try:
+            target.relative_to(self.root)
+        except ValueError as exc:
+            raise RequestError.invalid_params(
+                {
+                    "message": "Path outside configured pwd",
+                    "path": path,
+                    "root": str(self.root),
+                }
+            ) from exc
+        return target
 
 
 class AcpSession:
@@ -86,7 +295,9 @@ class AcpSession:
         self._session_id: str | None = session_id or None
 
     @classmethod
-    async def create(cls, config: AgentConfig, app_config: AppConfig, session_id: str = "") -> "AcpSession":
+    async def create(
+        cls, config: AgentConfig, app_config: AppConfig, session_id: str = ""
+    ) -> "AcpSession":
         """Start and initialize an ACP subprocess for one worker turn."""
 
         command = cls._command_for_config(config)
@@ -106,7 +317,9 @@ class AcpSession:
             raise AcpSessionError("ACP agent process did not expose stdio pipes")
 
         conn = acp.connect_to_agent(client, proc.stdin, proc.stdout)
-        stderr_task = asyncio.create_task(proc.stderr.read() if proc.stderr else _empty_bytes())
+        stderr_task = asyncio.create_task(
+            proc.stderr.read() if proc.stderr else _empty_bytes()
+        )
         session = cls(
             client=client,
             command=command,
@@ -122,10 +335,14 @@ class AcpSession:
             await conn.initialize(
                 protocol_version=PROTOCOL_VERSION,
                 client_capabilities=ClientCapabilities(
-                    fs=FileSystemCapabilities(read_text_file=True, write_text_file=True),
+                    fs=FileSystemCapabilities(
+                        read_text_file=True, write_text_file=True
+                    ),
                     terminal=True,
                 ),
-                client_info=Implementation(name="kanboard-agent-worker", version="0.1.0"),
+                client_info=Implementation(
+                    name="kanboard-agent-worker", version="0.1.0"
+                ),
             )
             return session
         except Exception:
@@ -141,7 +358,9 @@ class AcpSession:
 
         default = DEFAULT_ACP_COMMANDS.get(config.name.lower())
         if not default:
-            raise AcpSessionError(f"agent.command is required for ACP agent {config.name!r}")
+            raise AcpSessionError(
+                f"agent.command is required for ACP agent {config.name!r}"
+            )
         return (default,)
 
     @property
@@ -165,9 +384,13 @@ class AcpSession:
         """Load or create this wrapper's ACP session and send one prompt."""
 
         try:
-            return await asyncio.wait_for(self._run_turn(prompt), timeout=self._timeout_seconds)
+            return await asyncio.wait_for(
+                self._run_turn(prompt), timeout=self._timeout_seconds
+            )
         except TimeoutError as exc:
-            raise AcpSessionError(f"ACP agent timed out after {self._timeout_seconds} seconds") from exc
+            raise AcpSessionError(
+                f"ACP agent timed out after {self._timeout_seconds} seconds"
+            ) from exc
         except AcpSessionError:
             raise
         except Exception as exc:
@@ -227,7 +450,9 @@ class AcpSession:
             )
             return self._session_id
 
-        session = await self._conn.new_session(cwd=str(self._client.root), mcp_servers=mcp_servers)
+        session = await self._conn.new_session(
+            cwd=str(self._client.root), mcp_servers=mcp_servers
+        )
         return session.session_id
 
     def _kanboard_mcp_server(self) -> McpServerStdio:
@@ -241,195 +466,13 @@ class AcpSession:
                 EnvVariable(name="KANBOARD_URL", value=self._app_config.server.url),
                 EnvVariable(name="KANBOARD_USER", value=self._app_config.server.user),
                 EnvVariable(name="KANBOARD_TOKEN", value=self._app_config.server.token),
-                EnvVariable(name="KANBOARD_WORKER_BOARDS", value=_boards_env(self._app_config.boards)),
+                EnvVariable(
+                    name="KANBOARD_WORKER_BOARDS",
+                    value=_boards_env(self._app_config.boards),
+                ),
                 EnvVariable(name="KANBOARD_AGENT_PWD", value=str(self._client.root)),
             ],
         )
-
-
-class _AcpClient(Client):
-    """ACP client callbacks for filesystem, terminal, and session updates."""
-
-    def __init__(self, root: Path) -> None:
-        """Create callback state rooted at the configured agent directory."""
-
-        self.root = root.resolve()
-        self._messages: list[str] = []
-        self.terminals: dict[str, TerminalState] = {}
-
-    async def session_update(
-        self,
-        session_id: str,
-        update: UserMessageChunk
-        | AgentMessageChunk
-        | AgentThoughtChunk
-        | ToolCallStart
-        | ToolCallProgress
-        | AgentPlanUpdate
-        | AvailableCommandsUpdate
-        | CurrentModeUpdate
-        | ConfigOptionUpdate
-        | SessionInfoUpdate
-        | UsageUpdate,
-        **kwargs: Any,
-    ) -> None:
-        """Record agent message chunks emitted by the ACP server."""
-
-        if isinstance(update, AgentMessageChunk) and isinstance(update.content, TextContentBlock):
-            self._messages.append(update.content.text)
-
-    async def read_text_file(
-        self,
-        path: str,
-        session_id: str,
-        limit: int | None = None,
-        line: int | None = None,
-        **kwargs: Any,
-    ) -> ReadTextFileResponse:
-        """Read a UTF-8 file from inside the configured agent directory."""
-
-        target = self._path(path)
-        text = target.read_text(encoding="utf-8")
-        if line is not None:
-            text = "\n".join(text.splitlines()[max(0, line - 1) :])
-        if limit is not None:
-            text = text[:limit]
-        return ReadTextFileResponse(content=text)
-
-    async def write_text_file(self, content: str, path: str, session_id: str, **kwargs: Any) -> WriteTextFileResponse:
-        """Write a UTF-8 file inside the configured agent directory."""
-
-        target = self._path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-        return WriteTextFileResponse()
-
-    async def create_terminal(
-        self,
-        command: str,
-        session_id: str,
-        args: list[str] | None = None,
-        cwd: str | None = None,
-        env: list[EnvVariable] | None = None,
-        output_byte_limit: int | None = None,
-        **kwargs: Any,
-    ) -> CreateTerminalResponse:
-        """Start a terminal command rooted inside the configured directory."""
-
-        terminal_id = str(uuid.uuid4())
-        run_env = os.environ.copy()
-        for item in env or []:
-            run_env[item.name] = item.value
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                command,
-                *(args or []),
-                cwd=str(self._path(cwd or ".")),
-                env=run_env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except OSError as exc:
-            raise RequestError.invalid_params(f"Failed to start terminal command {command!r}: {exc}") from exc
-
-        output_task = asyncio.create_task(proc.communicate())
-        self.terminals[terminal_id] = TerminalState(
-            proc=proc,
-            output_task=output_task,
-            output_byte_limit=output_byte_limit,
-        )
-        return CreateTerminalResponse(terminal_id=terminal_id)
-
-    async def terminal_output(self, session_id: str, terminal_id: str, **kwargs: Any) -> TerminalOutputResponse:
-        """Return buffered terminal output when the command has finished."""
-
-        state = self.terminals[terminal_id]
-        output = ""
-        truncated = False
-        if state.output_task.done():
-            output, truncated = _terminal_output(state)
-        return TerminalOutputResponse(
-            output=output,
-            truncated=truncated,
-            exit_status=_terminal_exit_status(state.proc.returncode),
-        )
-
-    async def wait_for_terminal_exit(
-        self,
-        session_id: str,
-        terminal_id: str,
-        **kwargs: Any,
-    ) -> WaitForTerminalExitResponse:
-        """Wait until a terminal command exits."""
-
-        state = self.terminals[terminal_id]
-        await state.output_task
-        if state.proc.returncode is not None and state.proc.returncode < 0:
-            return WaitForTerminalExitResponse(signal=str(-state.proc.returncode))
-        return WaitForTerminalExitResponse(exit_code=max(0, state.proc.returncode or 0))
-
-    async def release_terminal(
-        self,
-        session_id: str,
-        terminal_id: str,
-        **kwargs: Any,
-    ) -> ReleaseTerminalResponse | None:
-        """Forget a terminal command and stop it if it is still running."""
-
-        state = self.terminals.pop(terminal_id, None)
-        if state and state.proc.returncode is None:
-            state.proc.kill()
-            with contextlib.suppress(Exception):
-                await state.output_task
-        return ReleaseTerminalResponse()
-
-    async def kill_terminal(self, session_id: str, terminal_id: str, **kwargs: Any) -> KillTerminalResponse | None:
-        """Kill a terminal command started by the ACP server."""
-
-        state = self.terminals.pop(terminal_id, None)
-        if state and state.proc.returncode is None:
-            state.proc.kill()
-            with contextlib.suppress(Exception):
-                await state.output_task
-        return KillTerminalResponse()
-
-    async def request_permission(self, *args, **kwargs):
-        """Reject unsupported ACP permission requests."""
-
-        raise RequestError.method_not_found("session/request_permission")
-
-    async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        """Reject unsupported ACP extension methods."""
-
-        raise RequestError.method_not_found(method)
-
-    async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
-        """Reject unsupported ACP extension notifications."""
-
-        raise RequestError.method_not_found(method)
-
-    def _agent_text(self) -> str:
-        """Return accumulated agent message text."""
-
-        return "".join(self._messages).strip()
-
-    def _clear_agent_text(self) -> None:
-        """Clear accumulated agent message text before a new prompt."""
-
-        self._messages.clear()
-
-    def _path(self, path: str) -> Path:
-        """Resolve a path and ensure it stays under the configured root."""
-
-        target = Path(path).expanduser()
-        if not target.is_absolute():
-            target = self.root / target
-        target = target.resolve()
-        try:
-            target.relative_to(self.root)
-        except ValueError as exc:
-            raise RequestError.invalid_params(f"Path outside configured pwd: {path}") from exc
-        return target
 
 
 @dataclass
@@ -467,7 +510,10 @@ def _terminal_output(state: TerminalState) -> tuple[str, bool]:
     output = (stdout or b"").decode(errors="replace")
     if stderr:
         output += "\n" + stderr.decode(errors="replace")
-    if state.output_byte_limit is None or len(output.encode()) <= state.output_byte_limit:
+    if (
+        state.output_byte_limit is None
+        or len(output.encode()) <= state.output_byte_limit
+    ):
         return output, False
     return output.encode()[: state.output_byte_limit].decode(errors="replace"), True
 

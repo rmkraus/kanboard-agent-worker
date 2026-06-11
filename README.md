@@ -97,8 +97,9 @@ For built-in agents, `agent.name` selects the default ACP command:
 `agent.command` can override the ACP executable. For any other `agent.name`,
 `agent.command` is required and must point at an ACP-compatible process. ACP
 sessions receive a Kanboard MCP server with tools to list, download, upload, and
-delete task attachments; create subtasks; and move cards to the configured
-`todo`, `working`, `blocked`, or `done` columns.
+delete task attachments; post task comments for links and coordination notes;
+create subtasks; and move cards to the configured `todo`, `working`, `blocked`,
+or `done` columns.
 
 All agents receive the same Jinja-rendered prompt template. It includes the
 worker username, card fields, task metadata, the visible Kanboard comment
