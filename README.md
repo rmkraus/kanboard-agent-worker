@@ -94,7 +94,22 @@ All adapters receive the same prompt template. It includes the worker username,
 card fields, task metadata, the visible Kanboard comment conversation, the task
 description, and `agent.system_prompt`. The template tells the agent that its
 final response will be posted as a Kanboard card comment and copied into
-`## Output`.
+`## Output`. The agent must end its final response with exactly one routing
+marker line:
+
+```text
+KANBOARD_STATUS: done
+```
+
+or:
+
+```text
+KANBOARD_STATUS: blocked
+```
+
+The worker strips that marker before posting the comment. `done` moves the card
+to the configured done column. `blocked` moves the card to the configured
+blocked column so a human can respond and put it back in the queue.
 
 Codex and Claude metadata is stored per Kanboard worker identity:
 
@@ -150,8 +165,9 @@ If `## Spec` is missing, the worker sends the whole description to the agent.
 5. Build one agent prompt from card metadata, conversation, worker identity, task description, and system prompt.
 6. Run the selected agent wrapper from `agent.pwd`.
 7. Save any emitted thread id in Kanboard task metadata.
-8. Post the wrapper's visible response to the Kanboard comments and update `## Output`.
-9. Move successful tasks to done; move failed tasks to blocked.
+8. Parse and strip `KANBOARD_STATUS` from the wrapper response.
+9. Post the visible response to the Kanboard comments and update `## Output`.
+10. Move `KANBOARD_STATUS: done` tasks to done and `KANBOARD_STATUS: blocked` tasks to blocked. Missing, invalid, or failed responses are blocked.
 
 ## API Notes
 

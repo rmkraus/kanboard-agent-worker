@@ -9,6 +9,7 @@ from typing import Any
 from .agents import AgentExecutionError, create_agent_wrapper
 from .config import AppConfig, BoardConfig
 from .kanboard import KanboardClient, KanboardError, column_lookup
+from .status import BLOCKED_STATUS, DONE_STATUS
 from .task_markdown import build_agent_prompt, replace_output_section, summarize_output
 
 LOGGER = logging.getLogger(__name__)
@@ -136,15 +137,14 @@ class Worker:
             updated = replace_output_section(str(task.get("description") or ""), card_text)
             self.client.update_task_description(task_id, updated)
 
-            if result.ok:
-                self.client.move_task_to_column(
-                    project_id=claimed.board.id,
-                    task_id=task_id,
-                    column_id=claimed.done_column_id,
-                    swimlane_id=task.get("swimlane_id", 0),
-                )
-            else:
+            if not result.ok:
                 self._block_task(claimed, f"Agent exited with code {result.exit_code}.")
+            elif result.status == DONE_STATUS:
+                self._move_task_to_column(claimed, claimed.done_column_id)
+            elif result.status == BLOCKED_STATUS:
+                self._move_task_to_column(claimed, claimed.blocked_column_id)
+            else:
+                self._block_task(claimed, "Agent response did not include KANBOARD_STATUS: done or blocked.")
         except (AgentExecutionError, KanboardError, Exception) as exc:
             self._block_task(claimed, f"Worker error: {exc}")
             raise
@@ -154,10 +154,14 @@ class Worker:
         task_id = task["id"]
         LOGGER.error("%s", message)
         self.client.create_comment(task_id, self._ensure_user_id(), message)
+        self._move_task_to_column(claimed, claimed.blocked_column_id)
+
+    def _move_task_to_column(self, claimed: ClaimedTask, column_id: int | str) -> None:
+        task = claimed.task
         self.client.move_task_to_column(
             project_id=claimed.board.id,
-            task_id=task_id,
-            column_id=claimed.blocked_column_id,
+            task_id=task["id"],
+            column_id=column_id,
             swimlane_id=task.get("swimlane_id", 0),
         )
 

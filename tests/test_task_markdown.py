@@ -30,4 +30,5 @@ def test_build_agent_prompt_contains_identity_metadata_conversation_and_system_p
     assert "Username: codex-node1" in prompt
     assert "kanboard_worker.codex-node1.thread_id" in prompt
     assert "1000 alice: Please fix this" in prompt
+    assert "KANBOARD_STATUS: done or KANBOARD_STATUS: blocked" in prompt
     assert "Your final response from this turn will be posted as a Kanboard card comment" in prompt

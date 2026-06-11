@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 from kanboard_agent_worker.agents import (
+    AgentExecResult,
     ClaudeAgentWrapper,
     CodexAgentWrapper,
     SubprocessAgentWrapper,
@@ -131,3 +132,30 @@ not-json
 
     assert CodexAgentWrapper._thread_id_from_events(events) == "abc"
     assert CodexAgentWrapper._final_agent_text_from_events(events) == "done"
+
+
+def test_agent_exec_result_extracts_status_marker() -> None:
+    result = AgentExecResult(
+        exit_code=0,
+        output="Finished.\n\nKANBOARD_STATUS: blocked\n",
+        stdout="raw stdout",
+        stderr="",
+        command=("agent",),
+    )
+
+    assert result.status == "blocked"
+    assert result.output == "Finished."
+    assert result.card_text() == "Finished."
+
+
+def test_agent_exec_result_does_not_show_status_only_output() -> None:
+    result = AgentExecResult(
+        exit_code=0,
+        output="KANBOARD_STATUS: done",
+        stdout="KANBOARD_STATUS: done",
+        stderr="",
+        command=("agent",),
+    )
+
+    assert result.status == "done"
+    assert result.card_text() == "Agent completed without output."

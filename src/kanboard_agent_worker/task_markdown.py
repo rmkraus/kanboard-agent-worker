@@ -11,6 +11,8 @@ Do the requested work in the configured working directory.
 Your final response from this turn will be posted as a Kanboard card comment and copied into the card's Output section.
 Make the final response concise, factual, and useful to a human reviewer.
 Include blockers or follow-up steps when relevant.
+End the final response with exactly one status line: KANBOARD_STATUS: done or KANBOARD_STATUS: blocked.
+Use KANBOARD_STATUS: blocked when you need human input or cannot continue safely.
 Do not include private reasoning or raw tool transcripts unless they are necessary for the update."""
 
 
