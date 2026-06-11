@@ -1,9 +1,13 @@
+"""Generic subprocess agent wrapper."""
+
 from __future__ import annotations
 
 from .base import AgentExecResult, AgentExecutionError, BaseAgentWrapper
 
 
 class SubprocessAgentWrapper(BaseAgentWrapper):
+    """Run a configured command as a stateless local agent."""
+
     def exec(self, thread_id: str, prompt: str) -> AgentExecResult:
         if not self.config.command:
             raise AgentExecutionError("agent.command is required for generic subprocess agents")

@@ -1,3 +1,5 @@
+"""Configuration loading and validation for the Kanboard worker."""
+
 from __future__ import annotations
 
 import os
@@ -15,6 +17,8 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class ServerConfig:
+    """Kanboard server credentials for a single worker identity."""
+
     user: str
     token: str
     url: str
@@ -22,6 +26,8 @@ class ServerConfig:
 
 @dataclass(frozen=True)
 class BoardConfig:
+    """Board-specific column mapping used by the worker lifecycle."""
+
     id: int | str
     todo: str
     working: str
@@ -31,6 +37,8 @@ class BoardConfig:
 
 @dataclass(frozen=True)
 class AgentConfig:
+    """Local CLI agent execution settings."""
+
     name: str
     command: tuple[str, ...]
     pwd: str
@@ -41,12 +49,16 @@ class AgentConfig:
 
 @dataclass(frozen=True)
 class WorkerSettings:
+    """Polling and concurrency settings for one worker process."""
+
     max_concurrency: int = 1
     poll_interval: int = 10
 
 
 @dataclass(frozen=True)
 class AppConfig:
+    """Fully validated application configuration."""
+
     server: ServerConfig
     worker: WorkerSettings
     agent: AgentConfig
@@ -54,6 +66,8 @@ class AppConfig:
 
 
 def load_config(path: str | Path) -> AppConfig:
+    """Load a YAML config file and apply supported environment overrides."""
+
     config_path = Path(path)
     if not config_path.exists():
         raise ConfigError(f"Config file not found: {config_path}")

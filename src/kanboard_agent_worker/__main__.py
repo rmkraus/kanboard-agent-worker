@@ -1,3 +1,5 @@
+"""Run the Kanboard agent worker as a module."""
+
 from .cli import main
 
 

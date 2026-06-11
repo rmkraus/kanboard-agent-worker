@@ -1,3 +1,5 @@
+"""Markdown prompt and output helpers for Kanboard cards."""
+
 from __future__ import annotations
 
 import json
@@ -24,6 +26,8 @@ def build_agent_prompt(
     worker_username: str,
     system_prompt: str = "",
 ) -> str:
+    """Build the prompt sent to the local agent for one Kanboard task."""
+
     title = str(task.get("title") or "")
     description = str(task.get("description") or "")
     spec = extract_section(description, "Spec") or description
@@ -59,6 +63,8 @@ def build_agent_prompt(
 
 
 def extract_section(markdown: str, section_name: str) -> str | None:
+    """Return the body of a second-level markdown section by heading name."""
+
     matches = list(SECTION_PATTERN.finditer(markdown))
     desired = section_name.casefold()
     for index, match in enumerate(matches):
@@ -71,6 +77,8 @@ def extract_section(markdown: str, section_name: str) -> str | None:
 
 
 def replace_output_section(markdown: str, output: str) -> str:
+    """Replace or append the card's ``## Output`` section."""
+
     replacement = f"## Output\n{output.strip()}\n"
     matches = list(SECTION_PATTERN.finditer(markdown))
 
@@ -88,6 +96,8 @@ def replace_output_section(markdown: str, output: str) -> str:
 
 
 def summarize_output(output: str, max_chars: int = 6000) -> str:
+    """Return bounded text suitable for a Kanboard comment and Output section."""
+
     clean = output.strip()
     if len(clean) <= max_chars:
         return clean or "Agent completed without output."

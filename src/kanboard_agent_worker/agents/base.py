@@ -1,3 +1,5 @@
+"""Shared agent wrapper interfaces and execution result types."""
+
 from __future__ import annotations
 
 import subprocess
@@ -14,6 +16,8 @@ class AgentExecutionError(RuntimeError):
 
 @dataclass(frozen=True)
 class AgentExecResult:
+    """Completed agent process output normalized for Kanboard consumption."""
+
     exit_code: int
     output: str
     stdout: str
@@ -35,6 +39,8 @@ class AgentExecResult:
         return self.exit_code == 0
 
     def card_text(self) -> str:
+        """Return the visible text to post back to the Kanboard card."""
+
         if self.output.strip():
             return self.output.strip()
         if self.stdout.strip():
@@ -49,18 +55,28 @@ class AgentExecResult:
 
 
 class AgentWrapper(Protocol):
+    """Minimal interface implemented by concrete CLI agent adapters."""
+
     def create_thread_id(self, project_id: int | str, task_id: int | str) -> str:
+        """Create or name an agent conversation for a Kanboard task."""
+
         ...
 
     def exec(self, thread_id: str, prompt: str) -> AgentExecResult:
+        """Run one prompt in the given agent conversation."""
+
         ...
 
 
 class BaseAgentWrapper:
+    """Base class for wrappers that execute local subprocess commands."""
+
     def __init__(self, config: AgentConfig) -> None:
         self.config = config
 
     def create_thread_id(self, project_id: int | str, task_id: int | str) -> str:
+        """Return an empty thread id for stateless subprocess-style agents."""
+
         return ""
 
     def _run(self, command: list[str], input_text: str | None = None) -> subprocess.CompletedProcess[str]:

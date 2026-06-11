@@ -1,3 +1,5 @@
+"""Agent wrapper factory and public wrapper exports."""
+
 from __future__ import annotations
 
 from ..config import AgentConfig
@@ -19,6 +21,8 @@ __all__ = [
 
 
 def create_agent_wrapper(config: AgentConfig) -> AgentWrapper:
+    """Return the concrete wrapper selected by ``config.name``."""
+
     name = config.name.lower()
     if name == "codex":
         return CodexAgentWrapper(config)

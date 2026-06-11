@@ -1,3 +1,5 @@
+"""Thin JSON-RPC client and lookup helpers for Kanboard."""
+
 from __future__ import annotations
 
 import itertools
@@ -13,6 +15,8 @@ class KanboardError(RuntimeError):
 
 @dataclass(frozen=True)
 class ColumnLookup:
+    """Resolved Kanboard columns required by the worker."""
+
     todo: dict[str, Any]
     working: dict[str, Any]
     blocked: dict[str, Any]
@@ -20,6 +24,8 @@ class ColumnLookup:
 
 
 class KanboardClient:
+    """Small Kanboard JSON-RPC client using user/PAT HTTP Basic auth."""
+
     def __init__(self, url: str, user: str, token: str, timeout: int = 30) -> None:
         self.endpoint = normalize_endpoint(url)
         self.user = user
@@ -30,6 +36,8 @@ class KanboardClient:
         self.session.auth = (user, token)
 
     def call(self, method: str, params: Any | None = None) -> Any:
+        """Call a Kanboard JSON-RPC method and return its result value."""
+
         payload: dict[str, Any] = {
             "jsonrpc": "2.0",
             "method": method,
@@ -146,6 +154,8 @@ class KanboardClient:
 
 
 def normalize_endpoint(url: str) -> str:
+    """Return a URL that points directly at Kanboard's JSON-RPC endpoint."""
+
     clean = url.rstrip("/")
     if clean.endswith("/jsonrpc.php"):
         return clean
@@ -153,6 +163,8 @@ def normalize_endpoint(url: str) -> str:
 
 
 def column_lookup(columns: list[dict[str, Any]], names: dict[str, str]) -> ColumnLookup:
+    """Resolve configured column names against Kanboard's column records."""
+
     by_title = {str(column.get("title")): column for column in columns}
     missing = [label for label, title in names.items() if title not in by_title]
     if missing:

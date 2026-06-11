@@ -1,3 +1,5 @@
+"""Command-line entry point for the Kanboard agent worker."""
+
 from __future__ import annotations
 
 import argparse
@@ -10,6 +12,8 @@ from .worker import Worker
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Parse CLI arguments and run the requested worker command."""
+
     parser = argparse.ArgumentParser(prog="kanboard-agent-worker")
     parser.add_argument("--config", default="config.yml", help="Path to YAML config file")
     parser.add_argument("--log-level", default="INFO", help="Python logging level")

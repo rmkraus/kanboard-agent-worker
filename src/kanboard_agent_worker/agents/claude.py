@@ -1,9 +1,13 @@
+"""Claude CLI agent wrapper."""
+
 from __future__ import annotations
 
 from .base import AgentExecResult, AgentExecutionError, BaseAgentWrapper
 
 
 class ClaudeAgentWrapper(BaseAgentWrapper):
+    """Run work in a named Claude CLI session."""
+
     def create_thread_id(self, project_id: int | str, task_id: int | str) -> str:
         session_name = f"kanboard-{project_id}-{task_id}"
         command = [self._executable(), "-n", session_name, "-p", "hello"]

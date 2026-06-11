@@ -1,3 +1,5 @@
+"""Kanboard polling worker and task lifecycle orchestration."""
+
 from __future__ import annotations
 
 import concurrent.futures
@@ -17,6 +19,8 @@ LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ClaimedTask:
+    """A task already moved into the working column and ready to execute."""
+
     board: BoardConfig
     task: dict[str, Any]
     done_column_id: int | str
@@ -24,12 +28,16 @@ class ClaimedTask:
 
 
 class Worker:
+    """Poll Kanboard, run assigned tasks through an agent, and route results."""
+
     def __init__(self, config: AppConfig, client: KanboardClient | None = None) -> None:
         self.config = config
         self.client = client or KanboardClient(config.server.url, config.server.user, config.server.token)
         self.user_id: int | str | None = None
 
     def check(self) -> list[str]:
+        """Validate credentials and configured board columns."""
+
         user = self.client.get_me()
         lines = [f"Authenticated as {user.get('username')} (id={user.get('id')})"]
         for board in self.config.boards:
@@ -47,6 +55,8 @@ class Worker:
         return lines
 
     def run_forever(self) -> None:
+        """Poll indefinitely, executing claimed work up to the concurrency limit."""
+
         self._ensure_user_id()
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.worker.max_concurrency) as executor:
             futures: set[concurrent.futures.Future[None]] = set()
@@ -60,6 +70,8 @@ class Worker:
                 time.sleep(self.config.worker.poll_interval)
 
     def run_once(self) -> int:
+        """Claim and execute currently available work once."""
+
         self._ensure_user_id()
         claimed = self.claim_available(limit=self.config.worker.max_concurrency)
         if not claimed:
@@ -78,6 +90,8 @@ class Worker:
         return exit_code
 
     def claim_available(self, limit: int) -> list[ClaimedTask]:
+        """Claim up to ``limit`` assigned tasks from configured todo columns."""
+
         claimed: list[ClaimedTask] = []
         for board in self.config.boards:
             if len(claimed) >= limit:
@@ -114,6 +128,8 @@ class Worker:
         return claimed
 
     def execute_claimed(self, claimed: ClaimedTask) -> None:
+        """Run the configured agent for one claimed task and route the card."""
+
         task = claimed.task
         task_id = task["id"]
 
@@ -248,4 +264,6 @@ class Worker:
 
 
 def thread_metadata_key(server_user: str) -> str:
+    """Return the Kanboard task metadata key for this worker's agent thread."""
+
     return f"kanboard_worker.{server_user}.thread_id"

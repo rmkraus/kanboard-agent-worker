@@ -1,3 +1,5 @@
+"""Parsing for agent-emitted Kanboard routing markers."""
+
 from __future__ import annotations
 
 import re
@@ -11,11 +13,15 @@ STATUS_LINE_PATTERN = re.compile(r"(?im)^[ \t]*KANBOARD_STATUS[ \t]*:[ \t]*([A-Z
 
 @dataclass(frozen=True)
 class ParsedKanboardStatus:
+    """Agent output split into a routing status and visible text."""
+
     status: str | None
     text: str
 
 
 def parse_kanboard_status(text: str) -> ParsedKanboardStatus:
+    """Extract the last valid KANBOARD_STATUS marker and strip all markers."""
+
     matches = list(STATUS_LINE_PATTERN.finditer(text))
     status = None
     if matches:

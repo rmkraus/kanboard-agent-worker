@@ -1,3 +1,5 @@
+"""Codex CLI agent wrapper."""
+
 from __future__ import annotations
 
 import json
@@ -7,6 +9,8 @@ from .base import AgentExecResult, AgentExecutionError, BaseAgentWrapper
 
 
 class CodexAgentWrapper(BaseAgentWrapper):
+    """Run work in a Codex CLI JSONL conversation."""
+
     def create_thread_id(self, project_id: int | str, task_id: int | str) -> str:
         command = [self._executable(), "exec", "--skip-git-repo-check", "--json", "-"]
         completed = self._run(command, input_text="hello")
