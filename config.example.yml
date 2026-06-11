@@ -7,6 +7,12 @@ worker:
   max_concurrency: 1
   poll_interval: 10
 
+roster:
+  - name: codex
+    description: Repository-oriented coding agent
+  - name: claude
+    description: General implementation agent
+
 agent:
   name: codex
   pwd: .

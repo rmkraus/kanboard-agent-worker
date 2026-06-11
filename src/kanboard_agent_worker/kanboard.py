@@ -105,6 +105,12 @@ class KanboardClient:
             raise KanboardError(f"getTask failed for task {task_id}")
         return result
 
+    def get_user_by_name(self, username: str) -> dict[str, Any]:
+        result = self.call("getUserByName", {"username": username})
+        if not result:
+            raise KanboardError(f"getUserByName failed for user {username!r}")
+        return result
+
     def get_all_comments(self, task_id: int | str) -> list[dict[str, Any]]:
         result = self.call("getAllComments", {"task_id": _coerce_id(task_id)})
         if result is False or result is None:
@@ -153,6 +159,69 @@ class KanboardClient:
         result = self.call("saveTaskMetadata", [_coerce_id(task_id), values])
         if result is not True:
             raise KanboardError(f"saveTaskMetadata failed for task {task_id}")
+
+    def get_all_subtasks(self, task_id: int | str) -> list[dict[str, Any]]:
+        result = self.call("getAllSubtasks", {"task_id": _coerce_id(task_id)})
+        if result is False or result is None:
+            raise KanboardError(f"getAllSubtasks failed for task {task_id}")
+        return result
+
+    def create_subtask(
+        self,
+        task_id: int | str,
+        title: str,
+        user_id: int | str = 0,
+        status: int = 0,
+    ) -> int:
+        result = self.call(
+            "createSubtask",
+            {
+                "task_id": _coerce_id(task_id),
+                "title": title,
+                "user_id": _coerce_id(user_id),
+                "status": status,
+            },
+        )
+        if result is False or result is None:
+            raise KanboardError(f"createSubtask failed for task {task_id}")
+        return int(result)
+
+    def update_subtask(
+        self,
+        subtask_id: int | str,
+        task_id: int | str,
+        *,
+        title: str | None = None,
+        user_id: int | str | None = None,
+        status: int | None = None,
+    ) -> None:
+        params: dict[str, Any] = {
+            "id": _coerce_id(subtask_id),
+            "task_id": _coerce_id(task_id),
+        }
+        if title is not None:
+            params["title"] = title
+        if user_id is not None:
+            params["user_id"] = _coerce_id(user_id)
+        if status is not None:
+            params["status"] = status
+
+        result = self.call("updateSubtask", params)
+        if result is not True:
+            raise KanboardError(f"updateSubtask failed for subtask {subtask_id}")
+
+    def has_subtask_timer(self, subtask_id: int | str, user_id: int | str) -> bool:
+        return bool(self.call("hasSubtaskTimer", [_coerce_id(subtask_id), _coerce_id(user_id)]))
+
+    def start_subtask_timer(self, subtask_id: int | str, user_id: int | str) -> None:
+        result = self.call("setSubtaskStartTime", [_coerce_id(subtask_id), _coerce_id(user_id)])
+        if result is not True:
+            raise KanboardError(f"setSubtaskStartTime failed for subtask {subtask_id}")
+
+    def stop_subtask_timer(self, subtask_id: int | str, user_id: int | str) -> None:
+        result = self.call("setSubtaskEndTime", [_coerce_id(subtask_id), _coerce_id(user_id)])
+        if result is not True:
+            raise KanboardError(f"setSubtaskEndTime failed for subtask {subtask_id}")
 
     def move_task_to_column(
         self,

@@ -17,6 +17,10 @@ Make the final response concise, factual, and useful to a human reviewer.
 Include blockers or follow-up steps when relevant.
 End the final response with exactly one status line: KANBOARD_STATUS: done or KANBOARD_STATUS: blocked.
 Use KANBOARD_STATUS: blocked when you need human input or cannot continue safely.
+You may create one or more Kanboard subtasks by adding directive lines:
+KANBAN_SUBTASK new task title
+KANBAN_SUBTASK_AGENT agent-name
+If you omit KANBAN_SUBTASK_AGENT, the subtask is assigned to your own worker identity.
 Do not include private reasoning or raw tool transcripts unless they are necessary for the update."""
 
 AGENT_PROMPT_TEMPLATE = Environment(
@@ -31,6 +35,9 @@ AGENT_PROMPT_TEMPLATE = Environment(
 # Kanboard Worker Identity
 Username: {{ worker_username }}
 Only work on behalf of this Kanboard user.
+
+# Agent Roster
+{{ roster }}
 
 # Kanboard Card Metadata
 {{ card_metadata }}
@@ -60,6 +67,8 @@ def build_agent_prompt(
     *,
     comments: list[dict[str, Any]] | None = None,
     metadata: dict[str, str] | None = None,
+    subtask: dict[str, Any] | None = None,
+    roster: tuple[Any, ...] | list[Any] | None = None,
     worker_username: str,
     system_prompt: str = "",
 ) -> str:
@@ -69,14 +78,20 @@ def build_agent_prompt(
     description = str(task.get("description") or "")
     spec = extract_section(description, "Spec") or description
     config = extract_section(description, "Config")
+    task_heading = f"Task #{task.get('id')}: {title}".strip()
+    if subtask:
+        subtask_title = str(subtask.get("title") or "")
+        task_heading = f"{task_heading} / Subtask #{subtask.get('id')}: {subtask_title}".strip()
+        spec = f"Subtask #{subtask.get('id')}: {subtask_title}\n\nParent task context:\n{spec}".strip()
 
     return (
         AGENT_PROMPT_TEMPLATE.render(
             system_prompt=_merged_system_prompt(system_prompt),
             worker_username=worker_username,
+            roster=_format_roster(roster or ()),
             card_metadata=_card_metadata_json(task, metadata or {}),
             conversation=_format_comments(comments or []),
-            task_heading=f"Task #{task.get('id')}: {title}".strip(),
+            task_heading=task_heading,
             spec=spec.strip(),
             config=config.strip() if config else "",
             description=description.strip(),
@@ -157,3 +172,24 @@ def _format_comments(comments: list[dict[str, Any]]) -> str:
         body = str(comment.get("comment") or "").strip()
         lines.append(f"- {created} {username}: {body}")
     return "\n".join(lines)
+
+
+def _format_roster(roster: tuple[Any, ...] | list[Any]) -> str:
+    if not roster:
+        return "No roster configured. Unassigned subtask directives default to this worker."
+
+    lines = []
+    for entry in roster:
+        if isinstance(entry, dict):
+            name = str(entry.get("name", ""))
+            description = str(entry.get("description", ""))
+        else:
+            name = str(getattr(entry, "name", ""))
+            description = str(getattr(entry, "description", ""))
+        if not name:
+            continue
+        if description:
+            lines.append(f"- {name}: {description}")
+        else:
+            lines.append(f"- {name}")
+    return "\n".join(lines) or "No roster configured. Unassigned subtask directives default to this worker."

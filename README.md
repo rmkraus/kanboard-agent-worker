@@ -47,6 +47,12 @@ worker:
   max_concurrency: 1
   poll_interval: 10
 
+roster:
+  - name: codex
+    description: Repository-oriented coding agent
+  - name: claude
+    description: General implementation agent
+
 agent:
   name: codex
   pwd: .
@@ -92,7 +98,8 @@ For built-in adapters, `agent.name` selects behavior:
 
 All adapters receive the same Jinja-rendered prompt template. It includes the
 worker username, card fields, task metadata, the visible Kanboard comment
-conversation, the task description, and `agent.system_prompt`. The template
+conversation, the configured `roster`, the task description, and
+`agent.system_prompt`. The template
 tells the agent that its final response will be posted as a Kanboard card
 comment and copied into `## Output`. The agent must end its final response with
 exactly one routing marker line:
@@ -115,6 +122,12 @@ Codex and Claude metadata is stored per Kanboard worker identity:
 
 ```text
 kanboard_worker.{server.user}.thread_id
+```
+
+Subtask agent metadata is stored on the parent task with the subtask id:
+
+```text
+kanboard_worker.{server.user}.subtask.{subtask_id}.thread_id
 ```
 
 ## Run
@@ -150,26 +163,71 @@ The worker replaces this section with the final summary.
 
 If `## Spec` is missing, the worker sends the whole description to the agent.
 
+## Subtasks
+
+Workers always look for assigned todo subtasks before claiming whole cards.
+Subtasks can be claimed from parent cards in any configured board column. When a
+worker starts a subtask, it marks the subtask in progress, starts the Kanboard
+subtask timer, and comments on the parent task. When the subtask finishes, the
+worker stops the timer, posts the result to the parent task comments, and marks
+the subtask done.
+
+On startup recovery, the worker pauses timers for its in-progress subtasks,
+returns those subtasks to todo, and posts the recovery comment on the parent
+task. Whole-card recovery still moves the worker's assigned in-process cards
+back to the todo column.
+
+Whole cards with pending subtasks are left in the queue and are not claimed
+until all subtasks are done. This allows subtasks to complete before the parent
+card is picked up for final task-level work.
+
+Agents can create one or more subtasks by including directive lines in their
+final response:
+
+```text
+KANBAN_SUBTASK Add API coverage for subtask timers
+KANBAN_SUBTASK_AGENT codex
+KANBAN_SUBTASK Verify the user flow manually
+KANBAN_SUBTASK_AGET claude
+```
+
+`KANBAN_SUBTASK_AGENT` assigns the preceding subtask to a configured roster
+entry. The misspelled `KANBAN_SUBTASK_AGET` spelling is also accepted for
+compatibility with early prompts. If the assignment line is omitted, the new
+subtask is assigned to the current worker. When a whole-card agent creates one
+or more subtasks, the worker adds those subtasks to the parent task and moves
+the parent task back to the configured todo/ready column instead of moving it to
+done.
+
 ## Worker Lifecycle
 
 1. On startup, move this worker's assigned working-column tasks back to the todo
-   column with a recovery comment.
+   column with a recovery comment, and pause/requeue this worker's in-progress
+   subtasks.
 2. Poll configured boards.
-3. Count tasks assigned to the worker in the working column.
-4. Claim assigned tasks from the todo column until concurrency is full.
-5. Move claimed tasks to the working column.
-6. Build one agent prompt from card metadata, conversation, worker identity, task
+3. Count tasks assigned to the worker in the working column plus assigned
+   in-progress subtasks.
+4. Claim assigned todo subtasks from any column until concurrency is full.
+5. Claim assigned whole tasks from the todo column when they have no pending
+   subtasks.
+6. Move claimed whole tasks to the working column.
+7. Build one agent prompt from card metadata, conversation, worker identity, task
    description, and system prompt.
-7. Run the selected agent wrapper from `agent.pwd`.
-8. Save any emitted thread id in Kanboard task metadata.
-9. Parse and strip `KANBOARD_STATUS` from the wrapper response.
-10. Post the visible response to the Kanboard comments and update `## Output`.
-11. Move `KANBOARD_STATUS: done` tasks to done and `KANBOARD_STATUS: blocked`
-    tasks to blocked. Missing, invalid, or failed responses are blocked.
+8. Run the selected agent wrapper from `agent.pwd`.
+9. Save any emitted thread id in Kanboard task metadata.
+10. Parse and strip `KANBOARD_STATUS` and `KANBAN_SUBTASK` directives from the
+    wrapper response.
+11. Post the visible response to the Kanboard comments and update `## Output`
+    for whole-task work.
+12. Move `KANBOARD_STATUS: done` tasks to done and `KANBOARD_STATUS: blocked`
+    tasks to blocked. If a done task created subtasks, return it to the
+    todo/ready column. Missing, invalid, or failed responses are blocked.
 
 ## API Notes
 
 The implementation uses Kanboard JSON-RPC 2.0 via POST requests, `getBoard` to
 read swimlanes/columns/tasks, `moveTaskPosition` for column moves, `updateTask`
-for description updates, `createComment` for progress comments, and `getMe` to
-resolve the authenticated user's numeric ID for comments.
+for description updates, `createComment` for progress comments, `getAllSubtasks`
+and `updateSubtask` for subtask lifecycle, `setSubtaskStartTime` and
+`setSubtaskEndTime` for timers, and `getMe` to resolve the authenticated user's
+numeric ID for comments.
