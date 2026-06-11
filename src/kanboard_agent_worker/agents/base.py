@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from ..config import AgentConfig
-from ..status import parse_kanboard_status
 
 
 class AgentExecutionError(RuntimeError):
@@ -25,14 +24,6 @@ class AgentExecResult:
     command: tuple[str, ...]
     events: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     thread_id: str | None = None
-    status: str | None = None
-
-    def __post_init__(self) -> None:
-        text = self.output if self.output.strip() else self.stdout
-        parsed = parse_kanboard_status(text)
-        object.__setattr__(self, "output", parsed.text)
-        if self.status is None and parsed.status:
-            object.__setattr__(self, "status", parsed.status)
 
     @property
     def ok(self) -> bool:
@@ -44,13 +35,9 @@ class AgentExecResult:
         if self.output.strip():
             return self.output.strip()
         if self.stdout.strip():
-            clean_stdout = parse_kanboard_status(self.stdout).text
-            if clean_stdout.strip():
-                return clean_stdout.strip()
+            return self.stdout.strip()
         if self.stderr.strip():
-            clean_stderr = parse_kanboard_status(self.stderr).text
-            if clean_stderr.strip():
-                return clean_stderr.strip()
+            return self.stderr.strip()
         return "Agent completed without output."
 
 

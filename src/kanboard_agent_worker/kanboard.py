@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import base64
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -165,6 +166,37 @@ class KanboardClient:
         if result is False or result is None:
             raise KanboardError(f"getAllSubtasks failed for task {task_id}")
         return result
+
+    def get_all_task_files(self, task_id: int | str) -> list[dict[str, Any]]:
+        result = self.call("getAllTaskFiles", {"task_id": _coerce_id(task_id)})
+        if result is False or result is None:
+            raise KanboardError(f"getAllTaskFiles failed for task {task_id}")
+        return result
+
+    def download_task_file(self, file_id: int | str) -> bytes:
+        result = self.call("downloadTaskFile", {"file_id": _coerce_id(file_id)})
+        if result is False or result is None:
+            raise KanboardError(f"downloadTaskFile failed for file {file_id}")
+        return base64.b64decode(str(result))
+
+    def create_task_file(self, project_id: int | str, task_id: int | str, filename: str, content: bytes) -> int:
+        result = self.call(
+            "createTaskFile",
+            {
+                "project_id": _coerce_id(project_id),
+                "task_id": _coerce_id(task_id),
+                "filename": filename,
+                "blob": base64.b64encode(content).decode("ascii"),
+            },
+        )
+        if result is False or result is None:
+            raise KanboardError(f"createTaskFile failed for task {task_id}")
+        return int(result)
+
+    def remove_task_file(self, file_id: int | str) -> None:
+        result = self.call("removeTaskFile", {"file_id": _coerce_id(file_id)})
+        if result is not True:
+            raise KanboardError(f"removeTaskFile failed for file {file_id}")
 
     def create_subtask(
         self,

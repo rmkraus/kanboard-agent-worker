@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from ..config import AgentConfig
+from ..config import AppConfig
+from .acp import ClaudeAcpAgentWrapper, CodexAcpAgentWrapper
 from .base import AgentExecResult, AgentExecutionError, AgentWrapper, BaseAgentWrapper
 from .claude import ClaudeAgentWrapper
 from .codex import CodexAgentWrapper
@@ -13,19 +15,25 @@ __all__ = [
     "AgentExecutionError",
     "AgentWrapper",
     "BaseAgentWrapper",
+    "ClaudeAcpAgentWrapper",
     "ClaudeAgentWrapper",
+    "CodexAcpAgentWrapper",
     "CodexAgentWrapper",
     "SubprocessAgentWrapper",
     "create_agent_wrapper",
 ]
 
 
-def create_agent_wrapper(config: AgentConfig) -> AgentWrapper:
+def create_agent_wrapper(config: AgentConfig, app_config: AppConfig | None = None) -> AgentWrapper:
     """Return the concrete wrapper selected by ``config.name``."""
 
     name = config.name.lower()
     if name == "codex":
-        return CodexAgentWrapper(config)
+        if app_config is None:
+            return CodexAgentWrapper(config)
+        return CodexAcpAgentWrapper(config, app_config)
     if name == "claude":
-        return ClaudeAgentWrapper(config)
+        if app_config is None:
+            return ClaudeAgentWrapper(config)
+        return ClaudeAcpAgentWrapper(config, app_config)
     return SubprocessAgentWrapper(config)

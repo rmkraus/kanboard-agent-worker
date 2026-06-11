@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+
 from kanboard_agent_worker.kanboard import KanboardClient, _is_database_locked_error, column_lookup, normalize_endpoint
 
 
@@ -54,6 +56,42 @@ def test_task_metadata_methods_call_expected_rpc() -> None:
         ("getTaskMetadata", [12]),
         ("getTaskMetadataByName", [12, "kanboard_worker.codex-node1.thread_id"]),
         ("saveTaskMetadata", [12, {"kanboard_worker.codex-node1.thread_id": "thread-123"}]),
+    ]
+
+
+def test_task_file_methods_call_expected_rpc() -> None:
+    calls = []
+
+    class FakeClient(KanboardClient):
+        def __init__(self) -> None:
+            pass
+
+        def call(self, method, params=None):
+            calls.append((method, params))
+            if method == "getAllTaskFiles":
+                return [{"id": 5, "name": "notes.txt"}]
+            if method == "downloadTaskFile":
+                return base64.b64encode(b"hello").decode("ascii")
+            if method == "createTaskFile":
+                return 7
+            return True
+
+    client = FakeClient()
+
+    assert client.get_all_task_files("12") == [{"id": 5, "name": "notes.txt"}]
+    assert client.download_task_file("5") == b"hello"
+    assert client.create_task_file("1", "12", "notes.txt", b"hello") == 7
+    client.remove_task_file("5")
+
+    encoded = base64.b64encode(b"hello").decode("ascii")
+    assert calls == [
+        ("getAllTaskFiles", {"task_id": 12}),
+        ("downloadTaskFile", {"file_id": 5}),
+        (
+            "createTaskFile",
+            {"project_id": 1, "task_id": 12, "filename": "notes.txt", "blob": encoded},
+        ),
+        ("removeTaskFile", {"file_id": 5}),
     ]
 
 

@@ -322,7 +322,7 @@ def test_worker_skips_top_level_tasks_with_pending_subtasks(tmp_path: Path) -> N
     assert moves == [(1, "43", 2, 8)]
 
 
-def test_worker_uses_agent_status_to_move_blocked_without_posting_marker(tmp_path: Path) -> None:
+def test_worker_respects_card_move_done_by_agent_tool(tmp_path: Path) -> None:
     key = thread_metadata_key("codex-node1")
     comments = []
     moves = []
@@ -350,6 +350,9 @@ def test_worker_uses_agent_status_to_move_blocked_without_posting_marker(tmp_pat
         def move_task_to_column(self, project_id, task_id, column_id, swimlane_id=0):
             moves.append(column_id)
 
+        def get_task(self, task_id):
+            return {"id": task_id, "column_id": 4, "assignee_username": "codex-node1", "swimlane_id": 8}
+
     class FakeWrapper:
         def create_thread_id(self, project_id, task_id):
             raise AssertionError("existing thread id should be reused")
@@ -358,7 +361,7 @@ def test_worker_uses_agent_status_to_move_blocked_without_posting_marker(tmp_pat
             assert thread_id == "thread-123"
             return AgentExecResult(
                 exit_code=0,
-                output="Need a human answer before I can continue.\n\nKANBOARD_STATUS: blocked",
+                output="Need a human answer before I can continue.",
                 stdout="",
                 stderr="",
                 command=("fake-agent",),
@@ -369,7 +372,7 @@ def test_worker_uses_agent_status_to_move_blocked_without_posting_marker(tmp_pat
     worker._agent_wrapper = lambda: FakeWrapper()
     claimed = ClaimedTask(
         board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
-        task={"id": "42", "description": "## Spec\nDo it\n\n## Output\nold"},
+        task={"id": "42", "column_id": 2, "description": "## Spec\nDo it\n\n## Output\nold"},
         done_column_id=3,
         blocked_column_id=4,
     )
@@ -377,13 +380,12 @@ def test_worker_uses_agent_status_to_move_blocked_without_posting_marker(tmp_pat
     worker.execute_claimed(claimed)
 
     assert comments == ["Need a human answer before I can continue."]
-    assert "KANBOARD_STATUS" not in descriptions[-1]
-    assert moves == [4]
+    assert descriptions[-1].strip().endswith("Need a human answer before I can continue.")
+    assert moves == []
 
 
-def test_worker_creates_requested_subtasks_and_returns_parent_to_ready(tmp_path: Path) -> None:
+def test_worker_does_not_complete_parent_when_agent_tool_created_pending_subtasks(tmp_path: Path) -> None:
     comments = []
-    created_subtasks = []
     descriptions = []
     moves = []
     key = thread_metadata_key("codex-node1")
@@ -404,31 +406,20 @@ def test_worker_creates_requested_subtasks_and_returns_parent_to_ready(tmp_path:
         def save_task_metadata(self, task_id, values):
             raise AssertionError("existing thread id should not be saved again")
 
-        def get_user_by_name(self, username):
-            return {"id": 11 if username == "claude" else 9, "username": username}
-
-        def create_subtask(self, task_id, title, user_id=0, status=0):
-            created_subtasks.append((task_id, title, user_id, status))
-            return len(created_subtasks) + 100
-
         def update_task_description(self, task_id, description):
             descriptions.append(description)
 
         def move_task_to_column(self, project_id, task_id, column_id, swimlane_id=0):
             moves.append(column_id)
 
+        def get_all_subtasks(self, task_id):
+            return [{"id": "101", "task_id": "42", "title": "Follow-up", "user_id": 11, "status": 0}]
+
     class FakeWrapper:
         def exec(self, thread_id, prompt):
             return AgentExecResult(
                 exit_code=0,
-                output=(
-                    "Split this into follow-up work.\n"
-                    "KANBAN_SUBTASK Add Claude coverage\n"
-                    "KANBAN_SUBTASK_AGET claude\n"
-                    "KANBAN_SUBTASK Add Codex coverage\n"
-                    "KANBAN_SUBTASK_AGENT codex-node1\n"
-                    "KANBOARD_STATUS: done"
-                ),
+                output="Split this into follow-up work and created a subtask.",
                 stdout="",
                 stderr="",
                 command=("fake-agent",),
@@ -447,15 +438,9 @@ def test_worker_creates_requested_subtasks_and_returns_parent_to_ready(tmp_path:
 
     worker.execute_claimed(claimed)
 
-    assert created_subtasks == [
-        ("42", "Add Claude coverage", 11, 0),
-        ("42", "Add Codex coverage", 9, 0),
-    ]
-    assert "KANBAN_SUBTASK" not in comments[-1]
-    assert "Created subtasks:" in comments[-1]
-    assert "Created subtasks:" in descriptions[-1]
-    # Column 1 is the configured todo/ready queue for this board.
-    assert moves == [1]
+    assert comments == ["Split this into follow-up work and created a subtask."]
+    assert descriptions[-1].strip().endswith("Split this into follow-up work and created a subtask.")
+    assert moves == []
 
 
 def test_worker_completes_subtask_and_comments_on_parent(tmp_path: Path) -> None:
@@ -494,7 +479,7 @@ def test_worker_completes_subtask_and_comments_on_parent(tmp_path: Path) -> None
             assert "Subtask #99: Subtask work" in prompt
             return AgentExecResult(
                 exit_code=0,
-                output="Subtask complete.\nKANBOARD_STATUS: done",
+                output="Subtask complete.",
                 stdout="",
                 stderr="",
                 command=("fake-agent",),

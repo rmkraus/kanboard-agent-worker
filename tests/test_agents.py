@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
+from kanboard_agent_worker.agents.acp import KanboardAcpClient
 from kanboard_agent_worker.agents import (
     AgentExecResult,
+    ClaudeAcpAgentWrapper,
     ClaudeAgentWrapper,
+    CodexAcpAgentWrapper,
     CodexAgentWrapper,
     SubprocessAgentWrapper,
     create_agent_wrapper,
 )
-from kanboard_agent_worker.config import AgentConfig
+from kanboard_agent_worker.config import AgentConfig, AppConfig, BoardConfig, ServerConfig, WorkerSettings
 
 
 def test_subprocess_wrapper_starts_process_in_configured_pwd(tmp_path: Path) -> None:
@@ -76,6 +80,25 @@ print(json.dumps({{"type": "thread.started", "thread_id": "thread-123"}}))
     assert stdin_file.read_text(encoding="utf-8") == "hello"
 
 
+def test_acp_client_terminal_runs_command(tmp_path: Path) -> None:
+    async def run_terminal() -> None:
+        client = KanboardAcpClient(tmp_path)
+        terminal = await client.create_terminal(
+            sys.executable,
+            session_id="session-1",
+            args=["-c", "print('ok')"],
+        )
+
+        exited = await client.wait_for_terminal_exit("session-1", terminal.terminal_id)
+        output = await client.terminal_output("session-1", terminal.terminal_id)
+
+        assert exited.exit_code == 0
+        assert output.exit_status.exit_code == 0
+        assert output.output.strip() == "ok"
+
+    asyncio.run(run_terminal())
+
+
 def test_claude_wrapper_resumes_named_session(tmp_path: Path) -> None:
     fake_claude = tmp_path / "claude"
     fake_claude.write_text(
@@ -121,6 +144,39 @@ def test_wrapper_factory_returns_claude_wrapper(tmp_path: Path) -> None:
     assert isinstance(wrapper, ClaudeAgentWrapper)
 
 
+def test_wrapper_factory_uses_acp_when_app_config_is_available(tmp_path: Path) -> None:
+    config = _app_config(tmp_path, agent_name="codex")
+
+    wrapper = create_agent_wrapper(config.agent, config)
+
+    assert isinstance(wrapper, CodexAcpAgentWrapper)
+
+
+def test_codex_acp_wrapper_ignores_legacy_codex_command(tmp_path: Path) -> None:
+    config = _app_config(tmp_path, agent_name="codex", command=("codex",))
+    wrapper = create_agent_wrapper(config.agent, config)
+
+    assert isinstance(wrapper, CodexAcpAgentWrapper)
+    assert wrapper._command() == ("codex-acp",)
+
+
+def test_codex_acp_wrapper_accepts_explicit_acp_command(tmp_path: Path) -> None:
+    command = ("npx", "-y", "@zed-industries/codex-acp")
+    config = _app_config(tmp_path, agent_name="codex", command=command)
+    wrapper = create_agent_wrapper(config.agent, config)
+
+    assert isinstance(wrapper, CodexAcpAgentWrapper)
+    assert wrapper._command() == command
+
+
+def test_wrapper_factory_uses_claude_acp_when_app_config_is_available(tmp_path: Path) -> None:
+    config = _app_config(tmp_path, agent_name="claude")
+
+    wrapper = create_agent_wrapper(config.agent, config)
+
+    assert isinstance(wrapper, ClaudeAcpAgentWrapper)
+
+
 def test_parse_codex_jsonl_helpers() -> None:
     events = CodexAgentWrapper._parse_jsonl_events(
         """
@@ -134,28 +190,34 @@ not-json
     assert CodexAgentWrapper._final_agent_text_from_events(events) == "done"
 
 
-def test_agent_exec_result_extracts_status_marker() -> None:
+def test_agent_exec_result_card_text_prefers_output() -> None:
     result = AgentExecResult(
         exit_code=0,
-        output="Finished.\n\nKANBOARD_STATUS: blocked\n",
+        output="Finished.\n",
         stdout="raw stdout",
         stderr="",
         command=("agent",),
     )
 
-    assert result.status == "blocked"
-    assert result.output == "Finished."
     assert result.card_text() == "Finished."
 
 
-def test_agent_exec_result_does_not_show_status_only_output() -> None:
+def test_agent_exec_result_uses_default_empty_output_message() -> None:
     result = AgentExecResult(
         exit_code=0,
-        output="KANBOARD_STATUS: done",
-        stdout="KANBOARD_STATUS: done",
+        output="",
+        stdout="",
         stderr="",
         command=("agent",),
     )
 
-    assert result.status == "done"
     assert result.card_text() == "Agent completed without output."
+
+
+def _app_config(tmp_path: Path, agent_name: str, command: tuple[str, ...] = ()) -> AppConfig:
+    return AppConfig(
+        server=ServerConfig(user="codex-node1", token="secret", url="http://localhost:8080"),
+        worker=WorkerSettings(max_concurrency=1, poll_interval=10),
+        agent=AgentConfig(name=agent_name, command=command, pwd=str(tmp_path)),
+        boards=(BoardConfig(id=1, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),),
+    )

@@ -11,7 +11,6 @@ from typing import Any
 from .agents import AgentExecutionError, create_agent_wrapper
 from .config import AppConfig, BoardConfig
 from .kanboard import KanboardClient, KanboardError, column_lookup
-from .status import BLOCKED_STATUS, DONE_STATUS, SubtaskDirective, parse_agent_directives
 from .task_markdown import build_agent_prompt, replace_output_section, summarize_output
 
 LOGGER = logging.getLogger(__name__)
@@ -42,7 +41,6 @@ class Worker:
         self.config = config
         self.client = client or KanboardClient(config.server.url, config.server.user, config.server.token)
         self._user_id: int | str | None = None
-        self._roster_user_ids: dict[str, int | str] = {}
 
     @property
     def user_id(self) -> int | str:
@@ -247,9 +245,7 @@ class Worker:
             )
             result = wrapper.exec(thread_id, prompt)
             self._save_agent_thread_id(claimed, result.thread_id)
-            parsed_directives = parse_agent_directives(result.card_text())
-            created_subtasks = self._create_requested_subtasks(task, parsed_directives.subtasks)
-            card_text = summarize_output(self._with_created_subtasks_summary(parsed_directives.text, created_subtasks))
+            card_text = summarize_output(result.card_text())
             self.client.create_comment(task_id, self.user_id, card_text)
 
             if claimed.subtask:
@@ -261,15 +257,12 @@ class Worker:
 
             if not result.ok:
                 self._block_task(claimed, f"Agent exited with code {result.exit_code}.")
-            elif result.status == DONE_STATUS:
-                if created_subtasks and claimed.todo_column_id is not None:
-                    self._move_task_to_column(claimed, claimed.todo_column_id)
-                else:
-                    self._move_task_to_column(claimed, claimed.done_column_id)
-            elif result.status == BLOCKED_STATUS:
-                self._move_task_to_column(claimed, claimed.blocked_column_id)
+            elif self._agent_moved_task(claimed):
+                return
+            elif self._task_has_pending_subtasks(task):
+                return
             else:
-                self._block_task(claimed, "Agent response did not include KANBOARD_STATUS: done or blocked.")
+                self._move_task_to_column(claimed, claimed.done_column_id)
         except (AgentExecutionError, KanboardError, Exception) as exc:
             if claimed.subtask:
                 self._block_subtask(claimed, f"Worker error: {exc}")
@@ -293,7 +286,7 @@ class Worker:
 
         if not result.ok:
             self._block_subtask(claimed, f"Agent exited with code {result.exit_code}.")
-        elif result.status == DONE_STATUS:
+        else:
             self.client.update_subtask(
                 claimed.subtask["id"],
                 claimed.task["id"],
@@ -301,10 +294,6 @@ class Worker:
                 user_id=self.user_id,
                 status=SUBTASK_STATUS_DONE,
             )
-        elif result.status == BLOCKED_STATUS:
-            self._block_subtask(claimed, "Subtask blocked by agent response.")
-        else:
-            self._block_subtask(claimed, "Agent response did not include KANBOARD_STATUS: done or blocked.")
 
     def _block_subtask(self, claimed: ClaimedTask, message: str) -> None:
         if not claimed.subtask:
@@ -394,7 +383,7 @@ class Worker:
         return any(_coerce_int(subtask.get("status")) != SUBTASK_STATUS_DONE for subtask in self.client.get_all_subtasks(task["id"]))
 
     def _agent_wrapper(self):
-        return create_agent_wrapper(self.config.agent)
+        return create_agent_wrapper(self.config.agent, self.config)
 
     def _ensure_agent_thread_id(self, claimed: ClaimedTask, wrapper, metadata: dict[str, str]) -> str:
         task = claimed.task
@@ -421,34 +410,11 @@ class Worker:
             return
         self.client.save_task_metadata(claimed.task["id"], {key: thread_id})
 
-    def _create_requested_subtasks(
-        self,
-        task: dict[str, Any],
-        directives: tuple[SubtaskDirective, ...],
-    ) -> list[tuple[int, str, str]]:
-        created = []
-        for directive in directives:
-            assignee = directive.assignee or self.config.server.user
-            user_id = self._roster_user_id(assignee)
-            subtask_id = self.client.create_subtask(task["id"], directive.title, user_id=user_id)
-            created.append((subtask_id, directive.title, assignee))
-        return created
-
-    def _roster_user_id(self, agent_name: str) -> int | str:
-        roster_names = {entry.name for entry in self.config.roster}
-        if roster_names and agent_name not in roster_names and agent_name != self.config.server.user:
-            raise KanboardError(f"Agent {agent_name!r} is not present in the configured roster")
-        if agent_name not in self._roster_user_ids:
-            self._roster_user_ids[agent_name] = self.client.get_user_by_name(agent_name)["id"]
-        return self._roster_user_ids[agent_name]
-
-    def _with_created_subtasks_summary(self, text: str, created_subtasks: list[tuple[int, str, str]]) -> str:
-        if not created_subtasks:
-            return text
-
-        lines = [text.strip(), "", "Created subtasks:"]
-        lines.extend(f"- #{subtask_id} assigned to {assignee}: {title}" for subtask_id, title, assignee in created_subtasks)
-        return "\n".join(line for line in lines if line is not None).strip()
+    def _agent_moved_task(self, claimed: ClaimedTask) -> bool:
+        if claimed.task.get("column_id") is None:
+            return False
+        current = self.client.get_task(claimed.task["id"])
+        return str(current.get("column_id")) != str(claimed.task.get("column_id"))
 
     def _collect_done_futures(
         self, futures: set[concurrent.futures.Future[None]]

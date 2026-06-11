@@ -8,6 +8,8 @@ from typing import Any
 
 from jinja2 import Environment, StrictUndefined
 
+from .config import RosterEntry
+
 SECTION_PATTERN = re.compile(r"(?m)^##\s+([A-Za-z0-9 _-]+)\s*$")
 
 DEFAULT_AGENT_SYSTEM_PROMPT = """You are a local CLI agent working from a Kanboard card.
@@ -15,12 +17,8 @@ Do the requested work in the configured working directory.
 Your final response from this turn will be posted as a Kanboard card comment and copied into the card's Output section.
 Make the final response concise, factual, and useful to a human reviewer.
 Include blockers or follow-up steps when relevant.
-End the final response with exactly one status line: KANBOARD_STATUS: done or KANBOARD_STATUS: blocked.
-Use KANBOARD_STATUS: blocked when you need human input or cannot continue safely.
-You may create one or more Kanboard subtasks by adding directive lines:
-KANBAN_SUBTASK new task title
-KANBAN_SUBTASK_AGENT agent-name
-If you omit KANBAN_SUBTASK_AGENT, the subtask is assigned to your own worker identity.
+Use the available Kanboard tools for attachments, creating subtasks, and moving the card between configured columns.
+Use the Kanboard move_column tool when the card should be blocked or moved somewhere other than the default successful completion path.
 Do not include private reasoning or raw tool transcripts unless they are necessary for the update."""
 
 AGENT_PROMPT_TEMPLATE = Environment(
@@ -68,7 +66,7 @@ def build_agent_prompt(
     comments: list[dict[str, Any]] | None = None,
     metadata: dict[str, str] | None = None,
     subtask: dict[str, Any] | None = None,
-    roster: tuple[Any, ...] | list[Any] | None = None,
+    roster: tuple[RosterEntry, ...] | list[RosterEntry] | None = None,
     worker_username: str,
     system_prompt: str = "",
 ) -> str:
@@ -174,22 +172,18 @@ def _format_comments(comments: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _format_roster(roster: tuple[Any, ...] | list[Any]) -> str:
+def _format_roster(roster: tuple[RosterEntry, ...] | list[RosterEntry]) -> str:
     if not roster:
-        return "No roster configured. Unassigned subtask directives default to this worker."
+        return "No roster configured. Agents can assign new subtasks to this worker."
 
     lines = []
     for entry in roster:
-        if isinstance(entry, dict):
-            name = str(entry.get("name", ""))
-            description = str(entry.get("description", ""))
-        else:
-            name = str(getattr(entry, "name", ""))
-            description = str(getattr(entry, "description", ""))
+        name = entry.name
+        description = entry.description
         if not name:
             continue
         if description:
             lines.append(f"- {name}: {description}")
         else:
             lines.append(f"- {name}")
-    return "\n".join(lines) or "No roster configured. Unassigned subtask directives default to this worker."
+    return "\n".join(lines) or "No roster configured. Agents can assign new subtasks to this worker."

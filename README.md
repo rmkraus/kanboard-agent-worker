@@ -16,7 +16,7 @@ This is the initial worker skeleton:
 - YAML configuration for server credentials, board IDs, and per-board column names
 - Kanboard JSON-RPC client using user credentials or a personal access token
 - Worker lifecycle for poll, claim, execute, comment, complete, and block
-- Agent adapters for Codex, Claude, and generic subprocess agents
+- ACP adapters for Codex and Claude, plus a generic subprocess agent
 - CLI commands for config/API checks and continuous polling
 
 ## Install
@@ -59,7 +59,7 @@ agent:
   system_prompt: |
     Follow the card instructions and keep the final response concise.
   command:
-    - codex
+    - codex-acp
   timeout_seconds: 3600
   pass_task_on_stdin: true
 
@@ -92,31 +92,26 @@ already exist. Older configs may use `agent.cwd`, but `agent.pwd` is preferred.
 
 For built-in adapters, `agent.name` selects behavior:
 
-- `codex`: creates a thread with `codex exec --json` and `hello`, extracts the emitted thread UUID from JSONL, stores it in task metadata, then resumes by UUID and uses the last JSONL agent message as the card response.
-- `claude`: creates a task session with `claude -n kanboard-{project_id}-{task_id} -p hello`, then runs `claude --resume <session> -p <prompt>`. Claude's stdout is the card response.
+- `codex`: starts `codex-acp` by default and communicates through the Agent Client Protocol.
+- `claude`: starts `claude-agent-acp` by default and communicates through the Agent Client Protocol.
 - anything else: generic subprocess runner using `agent.command`.
+
+For `codex` and `claude`, `agent.command` can override the ACP executable. Old
+legacy commands named exactly `codex` or `claude` are ignored so existing configs
+move to the default ACP executables. The built-in ACP adapters expose a Kanboard
+MCP server to the agent with tools to list, download, upload, and delete task
+attachments; create subtasks; and move cards to the configured `todo`,
+`working`, `blocked`, or `done` columns.
 
 All adapters receive the same Jinja-rendered prompt template. It includes the
 worker username, card fields, task metadata, the visible Kanboard comment
 conversation, the configured `roster`, the task description, and
 `agent.system_prompt`. The template
 tells the agent that its final response will be posted as a Kanboard card
-comment and copied into `## Output`. The agent must end its final response with
-exactly one routing marker line:
-
-```text
-KANBOARD_STATUS: done
-```
-
-or:
-
-```text
-KANBOARD_STATUS: blocked
-```
-
-The worker strips that marker before posting the comment. `done` moves the card
-to the configured done column. `blocked` moves the card to the configured
-blocked column so a human can respond and put it back in the queue.
+comment and copied into `## Output`. Successful whole-card work moves to the
+configured done column by default. Agents should call the Kanboard `move_column`
+tool when a card should be blocked or moved somewhere other than the default
+successful completion path.
 
 Codex and Claude metadata is stored per Kanboard worker identity:
 
@@ -181,23 +176,11 @@ Whole cards with pending subtasks are left in the queue and are not claimed
 until all subtasks are done. This allows subtasks to complete before the parent
 card is picked up for final task-level work.
 
-Agents can create one or more subtasks by including directive lines in their
-final response:
-
-```text
-KANBAN_SUBTASK Add API coverage for subtask timers
-KANBAN_SUBTASK_AGENT codex
-KANBAN_SUBTASK Verify the user flow manually
-KANBAN_SUBTASK_AGET claude
-```
-
-`KANBAN_SUBTASK_AGENT` assigns the preceding subtask to a configured roster
-entry. The misspelled `KANBAN_SUBTASK_AGET` spelling is also accepted for
-compatibility with early prompts. If the assignment line is omitted, the new
-subtask is assigned to the current worker. When a whole-card agent creates one
-or more subtasks, the worker adds those subtasks to the parent task and moves
-the parent task back to the configured todo/ready column instead of moving it to
-done.
+Agents can create one or more subtasks by calling the Kanboard `add_subtask`
+tool. The optional `assignee` argument should match a Kanboard username, usually
+one of the configured roster entries. When a whole-card agent creates pending
+subtasks, the worker sees those subtasks before auto-completing the parent and
+leaves the parent card in its current column.
 
 ## Worker Lifecycle
 
@@ -215,13 +198,12 @@ done.
    description, and system prompt.
 8. Run the selected agent wrapper from `agent.pwd`.
 9. Save any emitted thread id in Kanboard task metadata.
-10. Parse and strip `KANBOARD_STATUS` and `KANBAN_SUBTASK` directives from the
-    wrapper response.
-11. Post the visible response to the Kanboard comments and update `## Output`
-    for whole-task work.
-12. Move `KANBOARD_STATUS: done` tasks to done and `KANBOARD_STATUS: blocked`
-    tasks to blocked. If a done task created subtasks, return it to the
-    todo/ready column. Missing, invalid, or failed responses are blocked.
+10. Give ACP agents Kanboard tools for attachments, subtasks, and configured
+    column moves.
+11. Post the final response to Kanboard comments and update `## Output` for
+    whole-task work.
+12. Move successful whole-task work to done unless the agent already moved the
+    card or the card has pending subtasks. Failed responses are blocked.
 
 ## API Notes
 
@@ -229,5 +211,5 @@ The implementation uses Kanboard JSON-RPC 2.0 via POST requests, `getBoard` to
 read swimlanes/columns/tasks, `moveTaskPosition` for column moves, `updateTask`
 for description updates, `createComment` for progress comments, `getAllSubtasks`
 and `updateSubtask` for subtask lifecycle, `setSubtaskStartTime` and
-`setSubtaskEndTime` for timers, and `getMe` to resolve the authenticated user's
-numeric ID for comments.
+`setSubtaskEndTime` for timers, task file methods for attachments, and `getMe`
+to resolve the authenticated user's numeric ID for comments.

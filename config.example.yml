@@ -19,7 +19,7 @@ agent:
   system_prompt: |
     Follow the card instructions and keep the final response concise.
   command:
-    - codex
+    - codex-acp
   timeout_seconds: 3600
   pass_task_on_stdin: true
 
