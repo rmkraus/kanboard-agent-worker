@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import queue
 import subprocess
 import threading
@@ -34,12 +33,10 @@ class SubprocessAgentRunner:
 
     def run(self, task: dict[str, Any], prompt: str, on_output: OutputCallback | None = None) -> AgentResult:
         command = [part.format(task_id=task.get("id", ""), task_title=task.get("title", "")) for part in self.config.command]
-        cwd = self.config.cwd or os.getcwd()
-
         try:
             process = subprocess.Popen(
                 command,
-                cwd=cwd,
+                cwd=self.config.pwd,
                 stdin=subprocess.PIPE if self.config.pass_task_on_stdin else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,

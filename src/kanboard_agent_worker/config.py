@@ -33,9 +33,9 @@ class BoardConfig:
 class AgentConfig:
     name: str
     command: tuple[str, ...]
+    pwd: str
     timeout_seconds: int = 3600
     pass_task_on_stdin: bool = True
-    cwd: str | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +56,7 @@ def load_config(path: str | Path) -> AppConfig:
     config_path = Path(path)
     if not config_path.exists():
         raise ConfigError(f"Config file not found: {config_path}")
+    config_dir = config_path.resolve().parent
 
     with config_path.open("r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
@@ -64,10 +65,10 @@ def load_config(path: str | Path) -> AppConfig:
         raise ConfigError("Config root must be a mapping")
 
     expanded = _expand_env(raw)
-    return _from_mapping(expanded)
+    return _from_mapping(expanded, config_dir)
 
 
-def _from_mapping(raw: dict[str, Any]) -> AppConfig:
+def _from_mapping(raw: dict[str, Any], config_dir: Path) -> AppConfig:
     server_raw = _required_mapping(raw, "server")
     worker_raw = raw.get("worker") or {}
     agent_raw = raw.get("agent") or {}
@@ -100,9 +101,9 @@ def _from_mapping(raw: dict[str, Any]) -> AppConfig:
     agent = AgentConfig(
         name=str(agent_raw.get("name", "local")),
         command=_command_tuple(agent_raw.get("command")),
+        pwd=_agent_pwd(agent_raw, config_dir),
         timeout_seconds=_positive_int(agent_raw.get("timeout_seconds", 3600), "agent.timeout_seconds"),
         pass_task_on_stdin=bool(agent_raw.get("pass_task_on_stdin", True)),
-        cwd=agent_raw.get("cwd"),
     )
 
     boards = tuple(_board_from_mapping(item, index) for index, item in enumerate(boards_raw))
@@ -165,6 +166,20 @@ def _command_tuple(value: Any) -> tuple[str, ...]:
     if not command:
         raise ConfigError("agent.command is required")
     return command
+
+
+def _agent_pwd(agent_raw: dict[str, Any], config_dir: Path) -> str:
+    raw_value = os.getenv("AGENT_PWD", agent_raw.get("pwd", agent_raw.get("cwd", ".")))
+    if raw_value in (None, ""):
+        raise ConfigError("agent.pwd must not be empty")
+
+    path = Path(str(raw_value)).expanduser()
+    if not path.is_absolute():
+        path = config_dir / path
+    path = path.resolve()
+    if not path.is_dir():
+        raise ConfigError(f"agent.pwd must be an existing directory: {path}")
+    return str(path)
 
 
 def _expand_env(value: Any) -> Any:

@@ -49,6 +49,7 @@ worker:
 
 agent:
   name: codex
+  pwd: .
   command:
     - codex
     - exec
@@ -71,11 +72,16 @@ KANBOARD_USER=admin
 KANBOARD_TOKEN=admin
 WORKER_MAX_CONCURRENCY=2
 WORKER_POLL_INTERVAL=10
+AGENT_PWD=/path/to/checkout
 ```
 
 Kanboard's API endpoint is `/jsonrpc.php`; if the configured URL is the server
 root, the worker appends that path automatically. User API auth uses HTTP Basic
 auth with the Kanboard username and either password or personal access token.
+
+`agent.pwd` is the working directory used when starting the local agent command.
+Relative paths are resolved from the config file's directory. The directory must
+already exist. Older configs may use `agent.cwd`, but `agent.pwd` is preferred.
 
 ## Run
 
@@ -122,7 +128,7 @@ If `## Spec` is missing, the worker sends the whole description to the agent.
 2. Count tasks assigned to the worker in the working column.
 3. Claim assigned tasks from the todo column until concurrency is full.
 4. Move claimed tasks to the working column.
-5. Run the configured local CLI command with the task payload on stdin.
+5. Run the configured local CLI command from `agent.pwd` with the task payload on stdin.
 6. Stream command output to Kanboard comments.
 7. Move successful tasks to done and update `## Output`.
 8. Move failed tasks to blocked and comment the error.
