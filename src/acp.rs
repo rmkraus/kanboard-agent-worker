@@ -82,9 +82,14 @@ impl AcpSession {
         let mut child = Command::new(&command[0])
             .args(&command[1..])
             .current_dir(&root)
+            .env("KANBOARD_URL", &app_config.server.url)
+            .env("KANBOARD_USER", &app_config.server.user)
+            .env("KANBOARD_TOKEN", &app_config.server.token)
+            .env("KANBOARD_WORKER_BOARDS", boards_env(&app_config.boards))
+            .env("KANBOARD_AGENT_PWD", &root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|error| {
                 AppError::Acp(format!(
@@ -229,9 +234,6 @@ impl AcpSession {
                 .unwrap_or_else(|_| PathBuf::from("kanboard-agent-worker")),
             "args": ["mcp"],
             "env": [
-                {"name": "KANBOARD_URL", "value": self.app_config.server.url},
-                {"name": "KANBOARD_USER", "value": self.app_config.server.user},
-                {"name": "KANBOARD_TOKEN", "value": self.app_config.server.token},
                 {"name": "KANBOARD_WORKER_BOARDS", "value": boards_env(&self.app_config.boards)},
                 {"name": "KANBOARD_AGENT_PWD", "value": self.root},
             ]
