@@ -9,54 +9,51 @@ from kanboard_agent_worker.config import AgentConfig, AppConfig, BoardConfig, Se
 from kanboard_agent_worker.worker import (
     ClaimedTask,
     RECOVERY_COMMENT,
+    session_metadata_key,
     SUBTASK_STATUS_DONE,
     SUBTASK_STATUS_IN_PROGRESS,
     SUBTASK_STATUS_TODO,
     SUBTASK_WORK_STARTED_COMMENT,
     Worker,
     WORK_STARTED_COMMENT,
-    thread_metadata_key,
 )
 
 
-def test_thread_metadata_key_uses_server_user() -> None:
-    assert thread_metadata_key("codex-node1") == "kanboard_worker.codex-node1.thread_id"
+def test_session_metadata_key_uses_server_user() -> None:
+    assert session_metadata_key("codex-node1") == "kanboard_worker.codex-node1.session_id"
 
 
-def test_worker_saves_changed_agent_thread_id(tmp_path: Path) -> None:
+def test_worker_saves_changed_agent_session_id(tmp_path: Path) -> None:
     saved = {}
 
     class FakeClient:
-        async def get_task_metadata_by_name(self, task_id, name):
-            return ""
-
         async def save_task_metadata(self, task_id, values):
             saved[task_id] = values
 
     worker = Worker(_config(tmp_path), client=FakeClient(), user_id=9)
+    metadata = {}
 
     asyncio.run(
-        worker._save_agent_thread_id(
+        worker._save_agent_session_id(
             ClaimedTask(
                 board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
                 task={"id": "42"},
                 done_column_id=3,
                 blocked_column_id=4,
             ),
-            "thread-123",
+            metadata,
+            "session-123",
         ),
     )
 
-    assert saved == {"42": {"kanboard_worker.codex-node1.thread_id": "thread-123"}}
+    assert saved == {"42": {"kanboard_worker.codex-node1.session_id": "session-123"}}
+    assert metadata == {"kanboard_worker.codex-node1.session_id": "session-123"}
 
 
-def test_worker_returns_empty_thread_id_when_metadata_is_missing(tmp_path: Path) -> None:
+def test_worker_returns_empty_session_id_when_metadata_is_missing(tmp_path: Path) -> None:
     saved = {}
 
     class FakeClient:
-        async def get_task_metadata_by_name(self, task_id, name):
-            return ""
-
         async def save_task_metadata(self, task_id, values):
             saved[task_id] = values
 
@@ -69,9 +66,9 @@ def test_worker_returns_empty_thread_id_when_metadata_is_missing(tmp_path: Path)
     )
     metadata = {}
 
-    thread_id = asyncio.run(worker._agent_thread_id(claimed, metadata))
+    session_id = worker._agent_session_id(claimed, metadata)
 
-    assert thread_id == ""
+    assert session_id == ""
     assert metadata == {}
     assert saved == {}
 
@@ -343,7 +340,7 @@ def test_worker_iter_claimed_work_yields_until_no_work(tmp_path: Path) -> None:
 
 
 def test_worker_respects_card_move_done_by_agent_tool(tmp_path: Path) -> None:
-    key = thread_metadata_key("codex-node1")
+    key = session_metadata_key("codex-node1")
     comments = []
     moves = []
     descriptions = []
@@ -353,16 +350,13 @@ def test_worker_respects_card_move_done_by_agent_tool(tmp_path: Path) -> None:
             return []
 
         async def get_task_metadata(self, task_id):
-            return {key: "thread-123"}
+            return {key: "session-123"}
 
         async def create_comment(self, task_id, user_id, comment):
             comments.append(comment)
 
-        async def get_task_metadata_by_name(self, task_id, name):
-            return "thread-123"
-
         async def save_task_metadata(self, task_id, values):
-            raise AssertionError("existing thread id should not be saved again")
+            raise AssertionError("existing session id should not be saved again")
 
         async def update_task_description(self, task_id, description):
             descriptions.append(description)
@@ -393,23 +387,20 @@ def test_worker_does_not_complete_parent_when_agent_tool_created_pending_subtask
     comments = []
     descriptions = []
     moves = []
-    key = thread_metadata_key("codex-node1")
+    key = session_metadata_key("codex-node1")
 
     class FakeClient:
         async def get_all_comments(self, task_id):
             return []
 
         async def get_task_metadata(self, task_id):
-            return {key: "thread-123"}
+            return {key: "session-123"}
 
         async def create_comment(self, task_id, user_id, comment):
             comments.append(comment)
 
-        async def get_task_metadata_by_name(self, task_id, name):
-            return "thread-123"
-
         async def save_task_metadata(self, task_id, values):
-            raise AssertionError("existing thread id should not be saved again")
+            raise AssertionError("existing session id should not be saved again")
 
         async def update_task_description(self, task_id, description):
             descriptions.append(description)
@@ -441,23 +432,20 @@ def test_worker_completes_subtask_and_comments_on_parent(tmp_path: Path) -> None
     comments = []
     updates = []
     stopped_timers = []
-    key = thread_metadata_key("codex-node1", "99")
+    key = session_metadata_key("codex-node1", "99")
 
     class FakeClient:
         async def get_all_comments(self, task_id):
             return []
 
         async def get_task_metadata(self, task_id):
-            return {key: "thread-123"}
+            return {key: "session-123"}
 
         async def create_comment(self, task_id, user_id, comment):
             comments.append((task_id, user_id, comment))
 
-        async def get_task_metadata_by_name(self, task_id, name):
-            return "thread-123"
-
         async def save_task_metadata(self, task_id, values):
-            raise AssertionError("existing thread id should not be saved again")
+            raise AssertionError("existing session id should not be saved again")
 
         async def has_subtask_timer(self, subtask_id, user_id):
             return True
@@ -502,8 +490,9 @@ class FakeAcpSession:
         text: str,
         prompt_fragment: str | None = None,
         stop_reason: str = "end_turn",
+        session_id: str = "session-123",
     ) -> None:
-        self.session_id = "thread-123"
+        self.session_id = session_id
         self._text = text
         self._prompt_fragment = prompt_fragment
         self._response = PromptResponse(stop_reason=stop_reason)
@@ -514,8 +503,7 @@ class FakeAcpSession:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         return None
 
-    async def run_turn(self, thread_id: str, prompt: str) -> PromptResponse:
-        assert thread_id == "thread-123"
+    async def run_turn(self, prompt: str) -> PromptResponse:
         if self._prompt_fragment is not None:
             assert self._prompt_fragment in prompt
         return self._response
@@ -533,7 +521,9 @@ def _install_fake_acp_session(
 ) -> FakeAcpSession:
     session = FakeAcpSession(text=text, prompt_fragment=prompt_fragment, stop_reason=stop_reason)
 
-    async def fake_acp_session() -> FakeAcpSession:
+    async def fake_acp_session(session_id: str = "") -> FakeAcpSession:
+        assert session_id == "session-123"
+        session.session_id = session_id
         return session
 
     worker._acp_session = fake_acp_session

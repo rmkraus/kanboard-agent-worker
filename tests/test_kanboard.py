@@ -65,7 +65,7 @@ def test_task_metadata_methods_call_expected_rpc() -> None:
             if method == "getTaskMetadata":
                 return [{"foo": "bar"}]
             if method == "getTaskMetadataByName":
-                return "thread-123"
+                return "session-123"
             return True
 
     client = FakeClient()
@@ -73,16 +73,16 @@ def test_task_metadata_methods_call_expected_rpc() -> None:
     async def run() -> None:
         assert await client.get_all_comments("12") == [{"comment": "hello"}]
         assert await client.get_task_metadata("12") == {"foo": "bar"}
-        assert await client.get_task_metadata_by_name("12", "kanboard_worker.codex-node1.thread_id") == "thread-123"
-        await client.save_task_metadata("12", {"kanboard_worker.codex-node1.thread_id": "thread-123"})
+        assert await client.get_task_metadata_by_name("12", "kanboard_worker.codex-node1.session_id") == "session-123"
+        await client.save_task_metadata("12", {"kanboard_worker.codex-node1.session_id": "session-123"})
 
     asyncio.run(run())
 
     assert calls == [
         ("getAllComments", {"task_id": 12}),
         ("getTaskMetadata", [12]),
-        ("getTaskMetadataByName", [12, "kanboard_worker.codex-node1.thread_id"]),
-        ("saveTaskMetadata", [12, {"kanboard_worker.codex-node1.thread_id": "thread-123"}]),
+        ("getTaskMetadataByName", [12, "kanboard_worker.codex-node1.session_id"]),
+        ("saveTaskMetadata", [12, {"kanboard_worker.codex-node1.session_id": "session-123"}]),
     ]
 
 

@@ -230,7 +230,7 @@ class Worker:
         try:
             comments = await self.client.get_all_comments(task_id)
             metadata = await self.client.get_task_metadata(task_id)
-            thread_id = await self._agent_thread_id(claimed, metadata)
+            session_id = self._agent_session_id(claimed, metadata)
             prompt = build_agent_prompt(
                 task,
                 comments=comments,
@@ -240,9 +240,9 @@ class Worker:
                 worker_username=self.config.server.user,
                 system_prompt=self.config.agent.system_prompt,
             )
-            async with await self._acp_session() as session:
-                response = await session.run_turn(thread_id, prompt)
-                await self._save_agent_thread_id(claimed, session.session_id)
+            async with await self._acp_session(session_id) as session:
+                response = await session.run_turn(prompt)
+                await self._save_agent_session_id(claimed, metadata, session.session_id)
                 card_text = summarize_output(session.agent_text())
 
             await self.client.create_comment(task_id, self.user_id, card_text)
@@ -370,30 +370,33 @@ class Worker:
             for subtask in await self.client.get_all_subtasks(task["id"])
         )
 
-    async def _acp_session(self) -> AcpSession:
+    async def _acp_session(self, session_id: str = "") -> AcpSession:
         """Create a connected ACP session for the configured worker agent."""
 
-        return await AcpSession.create(self.config.agent, self.config)
+        return await AcpSession.create(self.config.agent, self.config, session_id=session_id)
 
-    async def _agent_thread_id(self, claimed: ClaimedTask, metadata: dict[str, str]) -> str:
-        task = claimed.task
-        key = thread_metadata_key(self.config.server.user, claimed.subtask.get("id") if claimed.subtask else None)
-        thread_id = metadata.get(key)
-        if not thread_id:
-            thread_id = await self.client.get_task_metadata_by_name(task["id"], key)
-        if thread_id:
-            metadata[key] = thread_id
-            return thread_id
-        return ""
+    def _agent_session_id(self, claimed: ClaimedTask, metadata: dict[str, str]) -> str:
+        """Return the stored ACP session id for the claimed work, if present."""
 
-    async def _save_agent_thread_id(self, claimed: ClaimedTask, thread_id: str | None) -> None:
-        if not thread_id:
+        key = session_metadata_key(self.config.server.user, claimed.subtask.get("id") if claimed.subtask else None)
+        session_id = metadata.get(key)
+        return session_id or ""
+
+    async def _save_agent_session_id(
+        self,
+        claimed: ClaimedTask,
+        metadata: dict[str, str],
+        session_id: str | None,
+    ) -> None:
+        """Persist the ACP session id when the turn created a new session."""
+
+        if not session_id:
             return
-        key = thread_metadata_key(self.config.server.user, claimed.subtask.get("id") if claimed.subtask else None)
-        existing = await self.client.get_task_metadata_by_name(claimed.task["id"], key)
-        if existing == thread_id:
+        key = session_metadata_key(self.config.server.user, claimed.subtask.get("id") if claimed.subtask else None)
+        if metadata.get(key) == session_id:
             return
-        await self.client.save_task_metadata(claimed.task["id"], {key: thread_id})
+        await self.client.save_task_metadata(claimed.task["id"], {key: session_id})
+        metadata[key] = session_id
 
     async def _agent_moved_task(self, claimed: ClaimedTask) -> bool:
         if claimed.task.get("column_id") is None:
@@ -409,12 +412,12 @@ class Worker:
             LOGGER.error("Background task execution failed: %s\n%s", exc, traceback_text)
 
 
-def thread_metadata_key(server_user: str, subtask_id: int | str | None = None) -> str:
-    """Return the Kanboard task metadata key for this worker's agent thread."""
+def session_metadata_key(server_user: str, subtask_id: int | str | None = None) -> str:
+    """Return the Kanboard task metadata key for this worker's ACP session."""
 
     if subtask_id is not None:
-        return f"kanboard_worker.{server_user}.subtask.{subtask_id}.thread_id"
-    return f"kanboard_worker.{server_user}.thread_id"
+        return f"kanboard_worker.{server_user}.subtask.{subtask_id}.session_id"
+    return f"kanboard_worker.{server_user}.session_id"
 
 
 def _coerce_int(value: Any) -> int:

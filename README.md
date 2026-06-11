@@ -113,13 +113,13 @@ successful completion path.
 Codex and Claude metadata is stored per Kanboard worker identity:
 
 ```text
-kanboard_worker.{server.user}.thread_id
+kanboard_worker.{server.user}.session_id
 ```
 
 Subtask agent metadata is stored on the parent task with the subtask id:
 
 ```text
-kanboard_worker.{server.user}.subtask.{subtask_id}.thread_id
+kanboard_worker.{server.user}.subtask.{subtask_id}.session_id
 ```
 
 ## Run
@@ -194,7 +194,7 @@ leaves the parent card in its current column.
 7. Build one agent prompt from card metadata, conversation, worker identity, task
    description, and system prompt.
 8. Run the selected ACP agent from `agent.pwd`.
-9. Save any emitted thread id in Kanboard task metadata.
+9. Save the ACP session id in Kanboard task metadata.
 10. Give ACP agents Kanboard tools for attachments, subtasks, and configured
     column moves.
 11. Post the final response to Kanboard comments and update `## Output` for

@@ -67,6 +67,7 @@ class AcpSession:
         stderr_task: asyncio.Task[bytes],
         timeout_seconds: int,
         app_config: AppConfig,
+        session_id: str = "",
     ) -> None:
         """Create a connected ACP session wrapper.
 
@@ -82,10 +83,10 @@ class AcpSession:
         self._stderr_task = stderr_task
         self._timeout_seconds = timeout_seconds
         self._app_config = app_config
-        self._session_id: str | None = None
+        self._session_id: str | None = session_id or None
 
     @classmethod
-    async def create(cls, config: AgentConfig, app_config: AppConfig) -> "AcpSession":
+    async def create(cls, config: AgentConfig, app_config: AppConfig, session_id: str = "") -> "AcpSession":
         """Start and initialize an ACP subprocess for one worker turn."""
 
         command = cls.command_for_config(config)
@@ -114,6 +115,7 @@ class AcpSession:
             stderr_task=stderr_task,
             timeout_seconds=config.timeout_seconds,
             app_config=app_config,
+            session_id=session_id,
         )
 
         try:
@@ -159,11 +161,11 @@ class AcpSession:
 
         return self._client._agent_text()
 
-    async def run_turn(self, thread_id: str, prompt: str) -> PromptResponse:
-        """Load or create an ACP session and send one prompt."""
+    async def run_turn(self, prompt: str) -> PromptResponse:
+        """Load or create this wrapper's ACP session and send one prompt."""
 
         try:
-            return await asyncio.wait_for(self._run_turn(thread_id, prompt), timeout=self._timeout_seconds)
+            return await asyncio.wait_for(self._run_turn(prompt), timeout=self._timeout_seconds)
         except TimeoutError as exc:
             raise AcpSessionError(f"ACP agent timed out after {self._timeout_seconds} seconds") from exc
         except AcpSessionError:
@@ -198,36 +200,32 @@ class AcpSession:
 
         await self.close()
 
-    async def _run_turn(self, thread_id: str, prompt: str) -> PromptResponse:
+    async def _run_turn(self, prompt: str) -> PromptResponse:
         """Run one prompt after loading or creating the ACP session."""
 
         self._client._clear_agent_text()
-        session_id = await self._session_id_for_turn(thread_id)
-        self._session_id = session_id
+        active_session_id = await self._session_id_for_turn()
+        self._session_id = active_session_id
         response = await self._conn.prompt(
-            session_id=session_id,
+            session_id=active_session_id,
             prompt=[text_block(prompt)],
             message_id=str(uuid.uuid4()),
         )
         with contextlib.suppress(Exception):
-            await self._conn.close_session(session_id)
+            await self._conn.close_session(active_session_id)
         return response
 
-    async def _session_id_for_turn(self, thread_id: str) -> str:
-        """Load an existing ACP session id or create a fresh session."""
+    async def _session_id_for_turn(self) -> str:
+        """Load this wrapper's ACP session id or create a fresh session."""
 
         mcp_servers = [self._kanboard_mcp_server()]
-        if thread_id:
-            try:
-                loaded = await self._conn.load_session(
-                    cwd=str(self._client.root),
-                    session_id=thread_id,
-                    mcp_servers=mcp_servers,
-                )
-            except Exception:
-                loaded = None
-            if loaded is not None:
-                return thread_id
+        if self._session_id:
+            await self._conn.load_session(
+                cwd=str(self._client.root),
+                session_id=self._session_id,
+                mcp_servers=mcp_servers,
+            )
+            return self._session_id
 
         session = await self._conn.new_session(cwd=str(self._client.root), mcp_servers=mcp_servers)
         return session.session_id
