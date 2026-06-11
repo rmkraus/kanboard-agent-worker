@@ -11,20 +11,19 @@ Kanboard is the shared state layer. There is no central dispatcher.
 
 ## Status
 
-This is the initial worker skeleton:
+This is the Rust worker implementation:
 
 - YAML configuration for server credentials, board IDs, and per-board column names
 - Kanboard JSON-RPC client using user credentials or a personal access token
 - Worker lifecycle for poll, claim, execute, comment, complete, and block
 - ACP agent execution for Codex, Claude, or an explicitly configured ACP command
+- Rust MCP stdio server exposing Kanboard tools to ACP agents
 - CLI commands for config/API checks and continuous polling
 
 ## Install
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python3 -m pip install -e ".[dev]"
+cargo build --release
 ```
 
 ## Configuration
@@ -96,18 +95,18 @@ For built-in agents, `agent.name` selects the default ACP command:
 
 `agent.command` can override the ACP executable. For any other `agent.name`,
 `agent.command` is required and must point at an ACP-compatible process. ACP
-sessions receive a Kanboard MCP server with tools to list, download, upload, and
-delete task attachments; post task comments for links and coordination notes;
-create subtasks; and move cards to the configured `todo`, `working`, `blocked`,
-or `done` columns.
+sessions receive a Kanboard MCP server by launching this same executable with
+the internal `mcp` subcommand. That server gives agents tools to list, download,
+upload, and delete task attachments; post task comments for links and
+coordination notes; create subtasks; and move cards to the configured `todo`,
+`working`, `blocked`, or `done` columns.
 
-All agents receive the same Jinja-rendered prompt template. It includes the
-worker username, card fields, task metadata, the visible Kanboard comment
-conversation, the configured `roster`, the task description, and
-`agent.system_prompt`. The template
-tells the agent that its final response will be posted as a Kanboard card
-comment. Larger artifacts should be written to files and attached to the card
-with the Kanboard attachment tools. Successful whole-card work moves to the
+All agents receive the same rendered prompt template. It includes the worker
+username, card fields, task metadata, the visible Kanboard comment conversation,
+the configured `roster`, the task description, and `agent.system_prompt`. The
+template tells the agent that its final response will be posted as a Kanboard
+card comment. Larger artifacts should be written to files and attached to the
+card with the Kanboard attachment tools. Successful whole-card work moves to the
 configured done column by default. Agents should call the Kanboard `move_column`
 tool when a card should be blocked or moved somewhere other than the default
 successful completion path.
@@ -129,13 +128,13 @@ kanboard_worker.{server.user}.subtask.{subtask_id}.session_id
 Check connectivity and board column configuration:
 
 ```bash
-kanboard-agent-worker --config config.yml check
+cargo run -- --config config.yml check
 ```
 
 Run continuously:
 
 ```bash
-kanboard-agent-worker --config config.yml run
+cargo run -- --config config.yml run
 ```
 
 ## Card Format
@@ -206,7 +205,16 @@ returns the parent card to the configured todo/ready column.
 
 The implementation uses Kanboard JSON-RPC 2.0 via POST requests, `getBoard` to
 read swimlanes/columns/tasks, `moveTaskPosition` for column moves,
-`createComment` for progress comments, `getAllTaskLinks` for internal dependency checks,
-`getAllSubtasks` and `updateSubtask` for subtask lifecycle, `setSubtaskStartTime` and
-`setSubtaskEndTime` for timers, task file methods for attachments, and `getMe`
-to resolve the authenticated user's numeric ID for comments.
+`createComment` for progress comments, `getAllTaskLinks` for internal
+dependency checks, `getAllSubtasks` and `updateSubtask` for subtask lifecycle,
+`setSubtaskStartTime` and `setSubtaskEndTime` for timers, task file methods for
+attachments, and `getMe` to resolve the authenticated user's numeric ID for
+comments.
+
+## Development
+
+```bash
+cargo fmt
+cargo clippy --all-targets
+cargo test
+```

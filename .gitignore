@@ -9,6 +9,7 @@ __pycache__/
 .ruff_cache/
 dist/
 build/
+target/
 *.egg-info/
 config.yml
 config.yaml
