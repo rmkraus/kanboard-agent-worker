@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import subprocess
-from dataclasses import dataclass, field
-from typing import Any, Protocol
+from dataclasses import dataclass
+from typing import Protocol
 
 from ..config import AgentConfig
 
@@ -22,7 +22,6 @@ class AgentExecResult:
     stdout: str
     stderr: str
     command: tuple[str, ...]
-    events: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     thread_id: str | None = None
 
     @property
