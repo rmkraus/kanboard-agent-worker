@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import re
+import shlex
 from typing import Any
+
+from .agents import AgentRunResult
 
 
 SECTION_PATTERN = re.compile(r"(?m)^##\s+([A-Za-z0-9 _-]+)\s*$")
@@ -61,3 +64,41 @@ def summarize_output(output: str, max_chars: int = 6000) -> str:
     if len(clean) <= max_chars:
         return clean or "Agent completed without output."
     return clean[:max_chars].rstrip() + "\n\n[Output truncated by worker.]"
+
+
+def build_summary_prompt(task: dict[str, Any], result: AgentRunResult, max_chars: int = 60000) -> str:
+    title = str(task.get("title") or "")
+    description = str(task.get("description") or "")
+    stdout = _truncate(result.stdout, max_chars)
+    stderr = _truncate(result.stderr, max_chars)
+    command = shlex.join(result.command)
+    status = "succeeded" if result.ok else "failed"
+
+    return f"""You just completed a Kanboard worker run.
+
+Write a concise Kanboard card comment for a human reviewer.
+Include the status, what happened, blockers if any, and next steps.
+Return only the comment text. Do not include a preamble or markdown code fence.
+
+Task id: {task.get("id")}
+Task title: {title}
+Run status: {status}
+Exit code: {result.exit_code}
+Command: {command}
+
+Task description:
+{description}
+
+STDOUT:
+{stdout}
+
+STDERR:
+{stderr}
+"""
+
+
+def _truncate(value: str, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    omitted = len(value) - max_chars
+    return value[:max_chars].rstrip() + f"\n\n[Truncated {omitted} characters.]"

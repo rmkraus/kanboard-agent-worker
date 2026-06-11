@@ -6,10 +6,10 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from .agents import AgentExecutionError, SubprocessAgentRunner
+from .agents import AgentExecutionError, AgentRunResult, create_agent_runner
 from .config import AppConfig, BoardConfig
 from .kanboard import KanboardClient, KanboardError, column_lookup
-from .task_markdown import build_agent_prompt, replace_output_section, summarize_output
+from .task_markdown import build_agent_prompt, build_summary_prompt, replace_output_section, summarize_output
 
 LOGGER = logging.getLogger(__name__)
 
@@ -22,37 +22,11 @@ class ClaimedTask:
     blocked_column_id: int | str
 
 
-class CommentStreamer:
-    def __init__(self, client: KanboardClient, task_id: int | str, user_id: int | str, flush_chars: int = 3000) -> None:
-        self.client = client
-        self.task_id = task_id
-        self.user_id = user_id
-        self.flush_chars = flush_chars
-        self._buffer: list[str] = []
-        self._buffer_size = 0
-
-    def write(self, line: str) -> None:
-        if not line:
-            return
-        self._buffer.append(line)
-        self._buffer_size += len(line) + 1
-        if self._buffer_size >= self.flush_chars:
-            self.flush()
-
-    def flush(self) -> None:
-        if not self._buffer:
-            return
-        content = "```\n" + "\n".join(self._buffer).strip() + "\n```"
-        self.client.create_comment(self.task_id, self.user_id, content)
-        self._buffer.clear()
-        self._buffer_size = 0
-
-
 class Worker:
     def __init__(self, config: AppConfig, client: KanboardClient | None = None) -> None:
         self.config = config
         self.client = client or KanboardClient(config.server.url, config.server.user, config.server.token)
-        self.runner = SubprocessAgentRunner(config.agent)
+        self.runner = create_agent_runner(config.agent)
         self.user_id: int | str | None = None
 
     def check(self) -> list[str]:
@@ -142,19 +116,18 @@ class Worker:
     def execute_claimed(self, claimed: ClaimedTask) -> None:
         task = claimed.task
         task_id = task["id"]
-        streamer = CommentStreamer(self.client, task_id, self._ensure_user_id())
 
         try:
             self.client.create_comment(task_id, self._ensure_user_id(), f"Starting `{self.config.agent.name}`.")
+            thread_id = self._ensure_agent_thread_id(task)
             prompt = build_agent_prompt(task)
-            result = self.runner.run(task, prompt, on_output=streamer.write)
-            streamer.flush()
+            result = self.runner.run_task(task, prompt, thread_id=thread_id)
+            summary = self._summarize_task_run(task, result, thread_id)
+            self.client.create_comment(task_id, self._ensure_user_id(), summary)
+            updated = replace_output_section(str(task.get("description") or ""), summary)
+            self.client.update_task_description(task_id, updated)
 
             if result.ok:
-                summary = summarize_output(result.output)
-                updated = replace_output_section(str(task.get("description") or ""), summary)
-                self.client.update_task_description(task_id, updated)
-                self.client.create_comment(task_id, self._ensure_user_id(), "Agent completed successfully.")
                 self.client.move_task_to_column(
                     project_id=claimed.board.id,
                     task_id=task_id,
@@ -164,7 +137,6 @@ class Worker:
             else:
                 self._block_task(claimed, f"Agent exited with code {result.exit_code}.")
         except (AgentExecutionError, KanboardError, Exception) as exc:
-            streamer.flush()
             self._block_task(claimed, f"Worker error: {exc}")
             raise
 
@@ -219,6 +191,34 @@ class Worker:
             self.user_id = user["id"]
         return self.user_id
 
+    def _ensure_agent_thread_id(self, task: dict[str, Any]) -> str | None:
+        if not self.runner.uses_threads:
+            return None
+
+        key = thread_metadata_key(self.config.server.user)
+        thread_id = self.client.get_task_metadata_by_name(task["id"], key)
+        if thread_id:
+            return thread_id
+
+        result = self.runner.create_thread(task)
+        if not result.thread_id:
+            raise AgentExecutionError(f"{self.config.agent.name} did not return a thread id")
+
+        self.client.save_task_metadata(task["id"], {key: result.thread_id})
+        return result.thread_id
+
+    def _summarize_task_run(self, task: dict[str, Any], result: AgentRunResult, thread_id: str | None) -> str:
+        prompt = build_summary_prompt(task, result)
+        summary_result = self.runner.summarize_run(task, prompt, thread_id=thread_id)
+        summary = summary_result.summary_text()
+        if summary_result.ok and summary:
+            return summary
+
+        fallback = summarize_output(result.transcript())
+        if fallback:
+            return f"Summary generation failed with exit code {summary_result.exit_code}.\n\n{fallback}"
+        return f"Summary generation failed with exit code {summary_result.exit_code}."
+
     def _collect_done_futures(
         self, futures: set[concurrent.futures.Future[None]]
     ) -> set[concurrent.futures.Future[None]]:
@@ -232,3 +232,7 @@ class Worker:
             except Exception:
                 LOGGER.exception("Background task execution failed")
         return active
+
+
+def thread_metadata_key(server_user: str) -> str:
+    return f"kanboard_agent.{server_user}.thread_id"

@@ -92,6 +92,17 @@ class KanboardClient:
         if result is not True:
             raise KanboardError(f"updateTask failed for task {task_id}")
 
+    def get_task_metadata_by_name(self, task_id: int | str, name: str) -> str:
+        result = self.call("getTaskMetadataByName", [_coerce_id(task_id), name])
+        if result is False or result is None:
+            return ""
+        return str(result)
+
+    def save_task_metadata(self, task_id: int | str, values: dict[str, str]) -> None:
+        result = self.call("saveTaskMetadata", [_coerce_id(task_id), values])
+        if result is not True:
+            raise KanboardError(f"saveTaskMetadata failed for task {task_id}")
+
     def move_task_to_column(
         self,
         project_id: int | str,

@@ -12,7 +12,6 @@ agent:
   pwd: .
   command:
     - codex
-    - exec
   timeout_seconds: 3600
   pass_task_on_stdin: true
 

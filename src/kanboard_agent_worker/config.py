@@ -160,11 +160,11 @@ def _command_tuple(value: Any) -> tuple[str, ...]:
         command = tuple(shlex.split(value))
     elif isinstance(value, list):
         command = tuple(str(part) for part in value)
+    elif value is None:
+        command = ()
     else:
         command = ()
 
-    if not command:
-        raise ConfigError("agent.command is required")
     return command
 
 
