@@ -1,23 +1,49 @@
 from __future__ import annotations
 
+import json
 import re
-import shlex
 from typing import Any
-
-from .agents import AgentRunResult
-
 
 SECTION_PATTERN = re.compile(r"(?m)^##\s+([A-Za-z0-9 _-]+)\s*$")
 
+DEFAULT_AGENT_SYSTEM_PROMPT = """You are a local CLI agent working from a Kanboard card.
+Do the requested work in the configured working directory.
+Your final response from this turn will be posted as a Kanboard card comment and copied into the card's Output section.
+Make the final response concise, factual, and useful to a human reviewer.
+Include blockers or follow-up steps when relevant.
+Do not include private reasoning or raw tool transcripts unless they are necessary for the update."""
 
-def build_agent_prompt(task: dict[str, Any]) -> str:
+
+def build_agent_prompt(
+    task: dict[str, Any],
+    *,
+    comments: list[dict[str, Any]] | None = None,
+    metadata: dict[str, str] | None = None,
+    worker_username: str,
+    system_prompt: str = "",
+) -> str:
     title = str(task.get("title") or "")
     description = str(task.get("description") or "")
     spec = extract_section(description, "Spec") or description
     config = extract_section(description, "Config")
+    merged_system_prompt = _merged_system_prompt(system_prompt)
 
     parts = [
-        f"Kanboard task #{task.get('id')}: {title}".strip(),
+        "# System Prompt",
+        merged_system_prompt,
+        "",
+        "# Kanboard Worker Identity",
+        f"Username: {worker_username}",
+        "Only work on behalf of this Kanboard user.",
+        "",
+        "# Kanboard Card Metadata",
+        _card_metadata_json(task, metadata or {}),
+        "",
+        "# Kanboard Conversation",
+        _format_comments(comments or []),
+        "",
+        "# Kanboard Task",
+        f"Task #{task.get('id')}: {title}".strip(),
         "",
         "## Spec",
         spec.strip(),
@@ -66,39 +92,33 @@ def summarize_output(output: str, max_chars: int = 6000) -> str:
     return clean[:max_chars].rstrip() + "\n\n[Output truncated by worker.]"
 
 
-def build_summary_prompt(task: dict[str, Any], result: AgentRunResult, max_chars: int = 60000) -> str:
-    title = str(task.get("title") or "")
-    description = str(task.get("description") or "")
-    stdout = _truncate(result.stdout, max_chars)
-    stderr = _truncate(result.stderr, max_chars)
-    command = shlex.join(result.command)
-    status = "succeeded" if result.ok else "failed"
-
-    return f"""You just completed a Kanboard worker run.
-
-Write a concise Kanboard card comment for a human reviewer.
-Include the status, what happened, blockers if any, and next steps.
-Return only the comment text. Do not include a preamble or markdown code fence.
-
-Task id: {task.get("id")}
-Task title: {title}
-Run status: {status}
-Exit code: {result.exit_code}
-Command: {command}
-
-Task description:
-{description}
-
-STDOUT:
-{stdout}
-
-STDERR:
-{stderr}
-"""
+def _merged_system_prompt(system_prompt: str) -> str:
+    configured = system_prompt.strip()
+    if not configured:
+        return DEFAULT_AGENT_SYSTEM_PROMPT
+    return DEFAULT_AGENT_SYSTEM_PROMPT + "\n\nAdditional worker instructions:\n" + configured
 
 
-def _truncate(value: str, max_chars: int) -> str:
-    if len(value) <= max_chars:
-        return value
-    omitted = len(value) - max_chars
-    return value[:max_chars].rstrip() + f"\n\n[Truncated {omitted} characters.]"
+def _card_metadata_json(task: dict[str, Any], metadata: dict[str, str]) -> str:
+    card_metadata = {
+        "task": {
+            key: value
+            for key, value in sorted(task.items())
+            if key not in {"description", "comment"}
+        },
+        "task_metadata": metadata,
+    }
+    return "```json\n" + json.dumps(card_metadata, indent=2, sort_keys=True, default=str) + "\n```"
+
+
+def _format_comments(comments: list[dict[str, Any]]) -> str:
+    if not comments:
+        return "No comments yet."
+
+    lines = []
+    for comment in comments:
+        username = comment.get("username") or comment.get("name") or f"user:{comment.get('user_id', 'unknown')}"
+        created = comment.get("date_creation") or "unknown-time"
+        body = str(comment.get("comment") or "").strip()
+        lines.append(f"- {created} {username}: {body}")
+    return "\n".join(lines)

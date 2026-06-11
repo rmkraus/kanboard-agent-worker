@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -14,74 +13,52 @@ class AgentExecutionError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class AgentRunResult:
+class AgentExecResult:
     exit_code: int
+    output: str
     stdout: str
     stderr: str
     command: tuple[str, ...]
     events: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     thread_id: str | None = None
-    final_text: str | None = None
 
     @property
     def ok(self) -> bool:
         return self.exit_code == 0
 
-    def summary_text(self) -> str:
-        if self.final_text:
-            return self.final_text.strip()
+    def card_text(self) -> str:
+        if self.output.strip():
+            return self.output.strip()
         if self.stdout.strip():
             return self.stdout.strip()
-        return self.stderr.strip()
-
-    def transcript(self) -> str:
-        parts = []
-        if self.stdout.strip():
-            parts.extend(["STDOUT:", self.stdout.strip()])
-        if self.stderr.strip():
-            parts.extend(["STDERR:", self.stderr.strip()])
-        return "\n".join(parts).strip()
+        return self.stderr.strip() or "Agent completed without output."
 
 
-class AgentRunner(Protocol):
-    uses_threads: bool
-
-    def create_thread(self, task: dict[str, Any]) -> AgentRunResult:
-        ...
-
-    def run_task(self, task: dict[str, Any], prompt: str, thread_id: str | None) -> AgentRunResult:
-        ...
-
-    def summarize_run(self, task: dict[str, Any], prompt: str, thread_id: str | None) -> AgentRunResult:
+class AgentWrapper(Protocol):
+    def exec(self, prompt: str) -> AgentExecResult:
         ...
 
 
-def create_agent_runner(config: AgentConfig) -> AgentRunner:
+def create_agent_wrapper(
+    config: AgentConfig,
+    thread_id: str | None = None,
+    default_thread_id: str | None = None,
+) -> AgentWrapper:
     name = config.name.lower()
     if name == "codex":
-        return CodexAgentRunner(config)
+        return CodexAgentWrapper(config, thread_id=thread_id)
     if name == "claude":
-        return ClaudeAgentRunner(config)
-    return SubprocessAgentRunner(config)
+        return ClaudeAgentWrapper(config, session_name=thread_id or default_thread_id, session_exists=bool(thread_id))
+    return SubprocessAgentWrapper(config)
 
 
-class BaseAgentRunner:
-    uses_threads = False
-
+class BaseAgentWrapper:
     def __init__(self, config: AgentConfig) -> None:
         self.config = config
 
-    def create_thread(self, task: dict[str, Any]) -> AgentRunResult:
-        raise AgentExecutionError(f"{self.config.name} does not support worker-managed threads yet")
-
-    def _run(
-        self,
-        command: list[str],
-        input_text: str | None = None,
-        parse_jsonl: bool = False,
-    ) -> AgentRunResult:
+    def _run(self, command: list[str], input_text: str | None = None) -> subprocess.CompletedProcess[str]:
         try:
-            completed = subprocess.run(
+            return subprocess.run(
                 command,
                 cwd=self.config.pwd,
                 input=input_text,
@@ -90,108 +67,92 @@ class BaseAgentRunner:
                 timeout=self.config.timeout_seconds,
                 check=False,
             )
-            stdout = completed.stdout
-            stderr = completed.stderr
-            exit_code = completed.returncode
         except subprocess.TimeoutExpired as exc:
             stdout = _decode_timeout_output(exc.stdout)
             stderr = _decode_timeout_output(exc.stderr)
             if stderr:
                 stderr += "\n"
             stderr += f"Agent timed out after {self.config.timeout_seconds} seconds."
-            exit_code = 124
+            return subprocess.CompletedProcess(command, 124, stdout=stdout, stderr=stderr)
         except OSError as exc:
             raise AgentExecutionError(f"Failed to start agent command {command!r}: {exc}") from exc
 
-        events = tuple(parse_jsonl_events(stdout)) if parse_jsonl else ()
-        return AgentRunResult(
-            exit_code=exit_code,
-            stdout=stdout,
-            stderr=stderr,
+
+class CodexAgentWrapper(BaseAgentWrapper):
+    def __init__(self, config: AgentConfig, thread_id: str | None = None) -> None:
+        super().__init__(config)
+        self.thread_id = thread_id
+
+    def exec(self, prompt: str) -> AgentExecResult:
+        if self.thread_id:
+            command = [self._executable(), "exec", "resume", self.thread_id, "--skip-git-repo-check", "--json", "-"]
+        else:
+            command = [self._executable(), "exec", "--skip-git-repo-check", "--json", "-"]
+
+        completed = self._run(command, input_text=prompt)
+        events = tuple(parse_jsonl_events(completed.stdout))
+        thread_id = thread_id_from_events(events) or self.thread_id
+        if thread_id:
+            self.thread_id = thread_id
+
+        return AgentExecResult(
+            exit_code=completed.returncode,
+            output=_output_from_jsonl(completed.stdout),
+            stdout=completed.stdout,
+            stderr=completed.stderr,
             command=tuple(command),
             events=events,
-            thread_id=thread_id_from_events(events),
-            final_text=final_agent_text_from_events(events),
+            thread_id=thread_id,
         )
-
-
-class CodexAgentRunner(BaseAgentRunner):
-    uses_threads = True
-
-    def create_thread(self, task: dict[str, Any]) -> AgentRunResult:
-        result = self._run(
-            [self._executable(), "exec", "--skip-git-repo-check", "--json", "-"],
-            input_text="hello",
-            parse_jsonl=True,
-        )
-        if not result.ok:
-            raise AgentExecutionError(f"Codex thread bootstrap failed with exit code {result.exit_code}")
-        if not result.thread_id:
-            raise AgentExecutionError("Codex did not emit thread.started with a thread_id")
-        return result
-
-    def run_task(self, task: dict[str, Any], prompt: str, thread_id: str | None) -> AgentRunResult:
-        if not thread_id:
-            raise AgentExecutionError("Codex requires a thread_id")
-        return self._run(
-            [self._executable(), "exec", "resume", thread_id, "--skip-git-repo-check", "--json", "-"],
-            input_text=prompt,
-            parse_jsonl=True,
-        )
-
-    def summarize_run(self, task: dict[str, Any], prompt: str, thread_id: str | None) -> AgentRunResult:
-        return self.run_task(task, prompt, thread_id)
 
     def _executable(self) -> str:
         return self.config.command[0] if self.config.command else "codex"
 
 
-class ClaudeAgentRunner(BaseAgentRunner):
-    uses_threads = True
+class ClaudeAgentWrapper(BaseAgentWrapper):
+    def __init__(self, config: AgentConfig, session_name: str | None = None, session_exists: bool = False) -> None:
+        super().__init__(config)
+        self.session_name = session_name
+        self.session_exists = session_exists
 
-    def create_thread(self, task: dict[str, Any]) -> AgentRunResult:
-        thread_id = str(uuid.uuid4())
-        result = self._run([self._executable(), "-p", "--session-id", thread_id, "hello"])
-        if not result.ok:
-            raise AgentExecutionError(f"Claude thread bootstrap failed with exit code {result.exit_code}")
-        return AgentRunResult(
-            exit_code=result.exit_code,
-            stdout=result.stdout,
-            stderr=result.stderr,
-            command=result.command,
-            thread_id=thread_id,
-            final_text=result.summary_text(),
+    def exec(self, prompt: str) -> AgentExecResult:
+        if not self.session_name:
+            raise AgentExecutionError("Claude requires a session name")
+
+        if self.session_exists:
+            command = [self._executable(), "--resume", self.session_name, "-p", prompt]
+        else:
+            command = [self._executable(), "-n", self.session_name, "-p", prompt]
+            self.session_exists = True
+
+        completed = self._run(command)
+        return AgentExecResult(
+            exit_code=completed.returncode,
+            output=completed.stdout.strip(),
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            command=tuple(command),
+            thread_id=self.session_name,
         )
-
-    def run_task(self, task: dict[str, Any], prompt: str, thread_id: str | None) -> AgentRunResult:
-        if not thread_id:
-            raise AgentExecutionError("Claude requires a thread_id")
-        return self._run([self._executable(), "-p", "--resume", thread_id, prompt])
-
-    def summarize_run(self, task: dict[str, Any], prompt: str, thread_id: str | None) -> AgentRunResult:
-        return self.run_task(task, prompt, thread_id)
 
     def _executable(self) -> str:
         return self.config.command[0] if self.config.command else "claude"
 
 
-class SubprocessAgentRunner(BaseAgentRunner):
-    def run_task(self, task: dict[str, Any], prompt: str, thread_id: str | None) -> AgentRunResult:
+class SubprocessAgentWrapper(BaseAgentWrapper):
+    def exec(self, prompt: str) -> AgentExecResult:
         if not self.config.command:
             raise AgentExecutionError("agent.command is required for generic subprocess agents")
-        command = [
-            part.format(
-                task_id=task.get("id", ""),
-                task_title=task.get("title", ""),
-                thread_id=thread_id or "",
-            )
-            for part in self.config.command
-        ]
+        command = list(self.config.command)
         input_text = prompt if self.config.pass_task_on_stdin else None
-        return self._run(command, input_text=input_text)
-
-    def summarize_run(self, task: dict[str, Any], prompt: str, thread_id: str | None) -> AgentRunResult:
-        return self.run_task(task, prompt, thread_id)
+        completed = self._run(command, input_text=input_text)
+        return AgentExecResult(
+            exit_code=completed.returncode,
+            output=completed.stdout.strip(),
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            command=tuple(command),
+        )
 
 
 def parse_jsonl_events(output: str) -> list[dict[str, Any]]:
@@ -226,6 +187,10 @@ def final_agent_text_from_events(events: tuple[dict[str, Any], ...] | list[dict[
     if not messages:
         return None
     return messages[-1]
+
+
+def _output_from_jsonl(stdout_jsonlines: str) -> str:
+    return final_agent_text_from_events(parse_jsonl_events(stdout_jsonlines)) or stdout_jsonlines.strip()
 
 
 def _decode_timeout_output(value: bytes | str | None) -> str:

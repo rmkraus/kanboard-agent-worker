@@ -10,6 +10,8 @@ worker:
 agent:
   name: codex
   pwd: .
+  system_prompt: |
+    Follow the card instructions and keep the final response concise.
   command:
     - codex
   timeout_seconds: 3600

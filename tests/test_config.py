@@ -21,6 +21,7 @@ worker:
 agent:
   name: codex
   pwd: ./workdir
+  system_prompt: Prefer small changes.
   command: "python -m example"
 boards:
   - id: 1
@@ -47,6 +48,7 @@ boards:
     assert config.worker.max_concurrency == 3
     assert config.agent.command == ("python", "-m", "example")
     assert config.agent.pwd == str(workdir.resolve())
+    assert config.agent.system_prompt == "Prefer small changes."
     assert config.boards[0].working == "In Process"
 
 

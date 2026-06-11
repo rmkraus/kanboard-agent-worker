@@ -6,10 +6,10 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from .agents import AgentExecutionError, AgentRunResult, create_agent_runner
+from .agents import AgentExecutionError, create_agent_wrapper
 from .config import AppConfig, BoardConfig
 from .kanboard import KanboardClient, KanboardError, column_lookup
-from .task_markdown import build_agent_prompt, build_summary_prompt, replace_output_section, summarize_output
+from .task_markdown import build_agent_prompt, replace_output_section, summarize_output
 
 LOGGER = logging.getLogger(__name__)
 
@@ -26,7 +26,6 @@ class Worker:
     def __init__(self, config: AppConfig, client: KanboardClient | None = None) -> None:
         self.config = config
         self.client = client or KanboardClient(config.server.url, config.server.user, config.server.token)
-        self.runner = create_agent_runner(config.agent)
         self.user_id: int | str | None = None
 
     def check(self) -> list[str]:
@@ -118,13 +117,22 @@ class Worker:
         task_id = task["id"]
 
         try:
+            comments = self.client.get_all_comments(task_id)
+            metadata = self.client.get_task_metadata(task_id)
             self.client.create_comment(task_id, self._ensure_user_id(), f"Starting `{self.config.agent.name}`.")
-            thread_id = self._ensure_agent_thread_id(task)
-            prompt = build_agent_prompt(task)
-            result = self.runner.run_task(task, prompt, thread_id=thread_id)
-            summary = self._summarize_task_run(task, result, thread_id)
-            self.client.create_comment(task_id, self._ensure_user_id(), summary)
-            updated = replace_output_section(str(task.get("description") or ""), summary)
+            wrapper = self._agent_wrapper(claimed, metadata)
+            prompt = build_agent_prompt(
+                task,
+                comments=comments,
+                metadata=metadata,
+                worker_username=self.config.server.user,
+                system_prompt=self.config.agent.system_prompt,
+            )
+            result = wrapper.exec(prompt)
+            self._save_agent_thread_id(task, result.thread_id)
+            card_text = summarize_output(result.card_text())
+            self.client.create_comment(task_id, self._ensure_user_id(), card_text)
+            updated = replace_output_section(str(task.get("description") or ""), card_text)
             self.client.update_task_description(task_id, updated)
 
             if result.ok:
@@ -191,33 +199,23 @@ class Worker:
             self.user_id = user["id"]
         return self.user_id
 
-    def _ensure_agent_thread_id(self, task: dict[str, Any]) -> str | None:
-        if not self.runner.uses_threads:
-            return None
-
+    def _agent_wrapper(self, claimed: ClaimedTask, metadata: dict[str, str] | None = None):
+        task = claimed.task
         key = thread_metadata_key(self.config.server.user)
-        thread_id = self.client.get_task_metadata_by_name(task["id"], key)
-        if thread_id:
-            return thread_id
+        thread_id = (metadata or {}).get(key)
+        if not thread_id:
+            thread_id = self.client.get_task_metadata_by_name(task["id"], key)
+        default_thread_id = default_thread_id_for_task(self.config.server.user, claimed.board.id, task["id"])
+        return create_agent_wrapper(self.config.agent, thread_id=thread_id or None, default_thread_id=default_thread_id)
 
-        result = self.runner.create_thread(task)
-        if not result.thread_id:
-            raise AgentExecutionError(f"{self.config.agent.name} did not return a thread id")
-
-        self.client.save_task_metadata(task["id"], {key: result.thread_id})
-        return result.thread_id
-
-    def _summarize_task_run(self, task: dict[str, Any], result: AgentRunResult, thread_id: str | None) -> str:
-        prompt = build_summary_prompt(task, result)
-        summary_result = self.runner.summarize_run(task, prompt, thread_id=thread_id)
-        summary = summary_result.summary_text()
-        if summary_result.ok and summary:
-            return summary
-
-        fallback = summarize_output(result.transcript())
-        if fallback:
-            return f"Summary generation failed with exit code {summary_result.exit_code}.\n\n{fallback}"
-        return f"Summary generation failed with exit code {summary_result.exit_code}."
+    def _save_agent_thread_id(self, task: dict[str, Any], thread_id: str | None) -> None:
+        if not thread_id:
+            return
+        key = thread_metadata_key(self.config.server.user)
+        existing = self.client.get_task_metadata_by_name(task["id"], key)
+        if existing == thread_id:
+            return
+        self.client.save_task_metadata(task["id"], {key: thread_id})
 
     def _collect_done_futures(
         self, futures: set[concurrent.futures.Future[None]]
@@ -236,3 +234,7 @@ class Worker:
 
 def thread_metadata_key(server_user: str) -> str:
     return f"kanboard_agent.{server_user}.thread_id"
+
+
+def default_thread_id_for_task(server_user: str, project_id: int | str, task_id: int | str) -> str:
+    return f"kanboard-{server_user}-{project_id}-{task_id}"

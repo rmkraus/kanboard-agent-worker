@@ -4,8 +4,8 @@ A pull-based worker for running local CLI agents from Kanboard tasks.
 
 Each worker is a Kanboard user. It polls configured boards, claims tasks assigned
 to that user from a configured todo column, moves them to a working column,
-runs a local command such as `codex`, `hermes`, or `claude`, comments progress
-back to the card, and moves the task to done or blocked.
+runs a local command such as `codex`, `hermes`, or `claude`, posts the agent's
+final response back to the card, and moves the task to done or blocked.
 
 Kanboard is the shared state layer. There is no central dispatcher.
 
@@ -50,6 +50,8 @@ worker:
 agent:
   name: codex
   pwd: .
+  system_prompt: |
+    Follow the card instructions and keep the final response concise.
   command:
     - codex
   timeout_seconds: 3600
@@ -84,9 +86,15 @@ already exist. Older configs may use `agent.cwd`, but `agent.pwd` is preferred.
 
 For built-in adapters, `agent.name` selects behavior:
 
-- `codex`: starts with `codex exec --json`, stores the emitted thread UUID in task metadata, and resumes by UUID.
-- `claude`: first-pass Claude wrapper using Claude Code print mode and session IDs.
+- `codex`: runs `codex exec --json`, extracts the last agent message from JSONL, stores the emitted thread UUID in task metadata, and resumes by UUID.
+- `claude`: runs `claude -n <session> -p <prompt>` for a new task session, then `claude --resume <session> -p <prompt>` for later turns. Claude's stdout is the card response.
 - anything else: generic subprocess runner using `agent.command`.
+
+All adapters receive the same prompt template. It includes the worker username,
+card fields, task metadata, the visible Kanboard comment conversation, the task
+description, and `agent.system_prompt`. The template tells the agent that its
+final response will be posted as a Kanboard card comment and copied into
+`## Output`.
 
 Codex and Claude metadata is stored per Kanboard worker identity:
 
@@ -139,12 +147,11 @@ If `## Spec` is missing, the worker sends the whole description to the agent.
 2. Count tasks assigned to the worker in the working column.
 3. Claim assigned tasks from the todo column until concurrency is full.
 4. Move claimed tasks to the working column.
-5. Ensure the task has an agent thread id in Kanboard task metadata.
-6. Run the local agent command from `agent.pwd`.
-7. Capture stdout, stderr, exit code, and parsed JSON events when available.
-8. Feed that run bundle back to the same agent for a concise card summary.
-9. Post only the summary to the Kanboard comments and update `## Output`.
-10. Move successful tasks to done; move failed tasks to blocked.
+5. Build one agent prompt from card metadata, conversation, worker identity, task description, and system prompt.
+6. Run the selected agent wrapper from `agent.pwd`.
+7. Save any emitted thread/session id in Kanboard task metadata.
+8. Post the wrapper's visible response to the Kanboard comments and update `## Output`.
+9. Move successful tasks to done; move failed tasks to blocked.
 
 ## API Notes
 

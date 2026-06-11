@@ -34,16 +34,24 @@ def test_task_metadata_methods_call_expected_rpc() -> None:
 
         def call(self, method, params=None):
             calls.append((method, params))
+            if method == "getAllComments":
+                return [{"comment": "hello"}]
+            if method == "getTaskMetadata":
+                return [{"foo": "bar"}]
             if method == "getTaskMetadataByName":
                 return "thread-123"
             return True
 
     client = FakeClient()
 
+    assert client.get_all_comments("12") == [{"comment": "hello"}]
+    assert client.get_task_metadata("12") == {"foo": "bar"}
     assert client.get_task_metadata_by_name("12", "kanboard_agent.codex-node1.thread_id") == "thread-123"
     client.save_task_metadata("12", {"kanboard_agent.codex-node1.thread_id": "thread-123"})
 
     assert calls == [
+        ("getAllComments", {"task_id": 12}),
+        ("getTaskMetadata", [12]),
         ("getTaskMetadataByName", [12, "kanboard_agent.codex-node1.thread_id"]),
         ("saveTaskMetadata", [12, {"kanboard_agent.codex-node1.thread_id": "thread-123"}]),
     ]

@@ -74,6 +74,12 @@ class KanboardClient:
             raise KanboardError(f"getTask failed for task {task_id}")
         return result
 
+    def get_all_comments(self, task_id: int | str) -> list[dict[str, Any]]:
+        result = self.call("getAllComments", {"task_id": _coerce_id(task_id)})
+        if result is False or result is None:
+            raise KanboardError(f"getAllComments failed for task {task_id}")
+        return result
+
     def create_comment(self, task_id: int | str, user_id: int | str, content: str) -> int:
         result = self.call(
             "createComment",
@@ -91,6 +97,20 @@ class KanboardClient:
         result = self.call("updateTask", {"id": _coerce_id(task_id), "description": description})
         if result is not True:
             raise KanboardError(f"updateTask failed for task {task_id}")
+
+    def get_task_metadata(self, task_id: int | str) -> dict[str, str]:
+        result = self.call("getTaskMetadata", [_coerce_id(task_id)])
+        if result is False or result is None:
+            return {}
+        if isinstance(result, dict):
+            return {str(key): str(value) for key, value in result.items()}
+        if isinstance(result, list):
+            metadata: dict[str, str] = {}
+            for item in result:
+                if isinstance(item, dict):
+                    metadata.update({str(key): str(value) for key, value in item.items()})
+            return metadata
+        return {}
 
     def get_task_metadata_by_name(self, task_id: int | str, name: str) -> str:
         result = self.call("getTaskMetadataByName", [_coerce_id(task_id), name])

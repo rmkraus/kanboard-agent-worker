@@ -34,6 +34,7 @@ class AgentConfig:
     name: str
     command: tuple[str, ...]
     pwd: str
+    system_prompt: str = ""
     timeout_seconds: int = 3600
     pass_task_on_stdin: bool = True
 
@@ -102,6 +103,7 @@ def _from_mapping(raw: dict[str, Any], config_dir: Path) -> AppConfig:
         name=str(agent_raw.get("name", "local")),
         command=_command_tuple(agent_raw.get("command")),
         pwd=_agent_pwd(agent_raw, config_dir),
+        system_prompt=str(agent_raw.get("system_prompt", "")).strip(),
         timeout_seconds=_positive_int(agent_raw.get("timeout_seconds", 3600), "agent.timeout_seconds"),
         pass_task_on_stdin=bool(agent_raw.get("pass_task_on_stdin", True)),
     )
