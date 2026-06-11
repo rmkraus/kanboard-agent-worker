@@ -6,6 +6,8 @@ import json
 import re
 from typing import Any
 
+from jinja2 import Environment, StrictUndefined
+
 SECTION_PATTERN = re.compile(r"(?m)^##\s+([A-Za-z0-9 _-]+)\s*$")
 
 DEFAULT_AGENT_SYSTEM_PROMPT = """You are a local CLI agent working from a Kanboard card.
@@ -16,6 +18,41 @@ Include blockers or follow-up steps when relevant.
 End the final response with exactly one status line: KANBOARD_STATUS: done or KANBOARD_STATUS: blocked.
 Use KANBOARD_STATUS: blocked when you need human input or cannot continue safely.
 Do not include private reasoning or raw tool transcripts unless they are necessary for the update."""
+
+AGENT_PROMPT_TEMPLATE = Environment(
+    autoescape=False,
+    lstrip_blocks=True,
+    trim_blocks=True,
+    undefined=StrictUndefined,
+).from_string(
+    """# System Prompt
+{{ system_prompt }}
+
+# Kanboard Worker Identity
+Username: {{ worker_username }}
+Only work on behalf of this Kanboard user.
+
+# Kanboard Card Metadata
+{{ card_metadata }}
+
+# Kanboard Conversation
+{{ conversation }}
+
+# Kanboard Task
+{{ task_heading }}
+
+## Spec
+{{ spec }}
+{% if config %}
+
+## Config
+{{ config }}
+{% endif %}
+
+## Full Card Description
+{{ description }}
+"""
+)
 
 
 def build_agent_prompt(
@@ -32,34 +69,20 @@ def build_agent_prompt(
     description = str(task.get("description") or "")
     spec = extract_section(description, "Spec") or description
     config = extract_section(description, "Config")
-    merged_system_prompt = _merged_system_prompt(system_prompt)
 
-    parts = [
-        "# System Prompt",
-        merged_system_prompt,
-        "",
-        "# Kanboard Worker Identity",
-        f"Username: {worker_username}",
-        "Only work on behalf of this Kanboard user.",
-        "",
-        "# Kanboard Card Metadata",
-        _card_metadata_json(task, metadata or {}),
-        "",
-        "# Kanboard Conversation",
-        _format_comments(comments or []),
-        "",
-        "# Kanboard Task",
-        f"Task #{task.get('id')}: {title}".strip(),
-        "",
-        "## Spec",
-        spec.strip(),
-    ]
-
-    if config:
-        parts.extend(["", "## Config", config.strip()])
-
-    parts.extend(["", "## Full Card Description", description.strip()])
-    return "\n".join(parts).strip() + "\n"
+    return (
+        AGENT_PROMPT_TEMPLATE.render(
+            system_prompt=_merged_system_prompt(system_prompt),
+            worker_username=worker_username,
+            card_metadata=_card_metadata_json(task, metadata or {}),
+            conversation=_format_comments(comments or []),
+            task_heading=f"Task #{task.get('id')}: {title}".strip(),
+            spec=spec.strip(),
+            config=config.strip() if config else "",
+            description=description.strip(),
+        ).strip()
+        + "\n"
+    )
 
 
 def extract_section(markdown: str, section_name: str) -> str | None:

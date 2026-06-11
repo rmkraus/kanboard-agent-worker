@@ -4,7 +4,13 @@ from pathlib import Path
 
 from kanboard_agent_worker.agents import AgentExecResult
 from kanboard_agent_worker.config import AgentConfig, AppConfig, BoardConfig, ServerConfig, WorkerSettings
-from kanboard_agent_worker.worker import ClaimedTask, Worker, thread_metadata_key
+from kanboard_agent_worker.worker import (
+    ClaimedTask,
+    RECOVERY_COMMENT,
+    Worker,
+    WORK_STARTED_COMMENT,
+    thread_metadata_key,
+)
 
 
 def test_thread_metadata_key_uses_server_user() -> None:
@@ -64,6 +70,110 @@ def test_worker_creates_and_saves_missing_thread_id(tmp_path: Path) -> None:
     assert saved == {"42": {"kanboard_worker.codex-node1.thread_id": "thread-123"}}
 
 
+def test_worker_comments_when_claiming_task(tmp_path: Path) -> None:
+    comments = []
+    moves = []
+
+    class FakeClient:
+        def get_columns(self, project_id):
+            return [
+                {"id": 1, "title": "Ready"},
+                {"id": 2, "title": "In Progress"},
+                {"id": 3, "title": "Done"},
+                {"id": 4, "title": "Blocked"},
+            ]
+
+        def get_board(self, project_id):
+            return [
+                {
+                    "columns": [
+                        {
+                            "id": 1,
+                            "tasks": [
+                                {
+                                    "id": "42",
+                                    "assignee_username": "codex-node1",
+                                    "swimlane_id": 8,
+                                }
+                            ],
+                        },
+                        {"id": 2, "tasks": []},
+                    ]
+                }
+            ]
+
+        def move_task_to_column(self, project_id, task_id, column_id, swimlane_id=0):
+            moves.append((project_id, task_id, column_id, swimlane_id))
+
+        def create_comment(self, task_id, user_id, comment):
+            comments.append((task_id, user_id, comment))
+
+        def get_task(self, task_id):
+            return {"id": task_id, "assignee_username": "codex-node1", "swimlane_id": 8}
+
+    worker = Worker(_config(tmp_path), client=FakeClient())
+    worker._user_id = 9
+
+    claimed = worker.claim_available(limit=1)
+
+    assert len(claimed) == 1
+    assert moves == [(1, "42", 2, 8)]
+    assert comments == [("42", 9, WORK_STARTED_COMMENT)]
+
+
+def test_worker_recovers_assigned_working_tasks_to_queue(tmp_path: Path) -> None:
+    comments = []
+    moves = []
+
+    class FakeClient:
+        def get_columns(self, project_id):
+            return [
+                {"id": 1, "title": "Ready"},
+                {"id": 2, "title": "In Progress"},
+                {"id": 3, "title": "Done"},
+                {"id": 4, "title": "Blocked"},
+            ]
+
+        def get_board(self, project_id):
+            return [
+                {
+                    "columns": [
+                        {"id": 1, "tasks": []},
+                        {
+                            "id": 2,
+                            "tasks": [
+                                {
+                                    "id": "42",
+                                    "assignee_username": "codex-node1",
+                                    "swimlane_id": 8,
+                                },
+                                {
+                                    "id": "43",
+                                    "assignee_username": "other-worker",
+                                    "swimlane_id": 8,
+                                },
+                            ],
+                        },
+                    ]
+                }
+            ]
+
+        def create_comment(self, task_id, user_id, comment):
+            comments.append((task_id, user_id, comment))
+
+        def move_task_to_column(self, project_id, task_id, column_id, swimlane_id=0):
+            moves.append((project_id, task_id, column_id, swimlane_id))
+
+    worker = Worker(_config(tmp_path), client=FakeClient())
+    worker._user_id = 9
+
+    recovered = worker.recover_in_process_tasks()
+
+    assert recovered == 1
+    assert comments == [("42", 9, RECOVERY_COMMENT)]
+    assert moves == [(1, "42", 1, 8)]
+
+
 def test_worker_uses_agent_status_to_move_blocked_without_posting_marker(tmp_path: Path) -> None:
     key = thread_metadata_key("codex-node1")
     comments = []
@@ -107,7 +217,7 @@ def test_worker_uses_agent_status_to_move_blocked_without_posting_marker(tmp_pat
             )
 
     worker = Worker(_config(tmp_path), client=FakeClient())
-    worker.user_id = 9
+    worker._user_id = 9
     worker._agent_wrapper = lambda: FakeWrapper()
     claimed = ClaimedTask(
         board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
@@ -118,7 +228,7 @@ def test_worker_uses_agent_status_to_move_blocked_without_posting_marker(tmp_pat
 
     worker.execute_claimed(claimed)
 
-    assert comments[-1] == "Need a human answer before I can continue."
+    assert comments == ["Need a human answer before I can continue."]
     assert "KANBOARD_STATUS" not in descriptions[-1]
     assert moves == [4]
 

@@ -32,3 +32,13 @@ def test_build_agent_prompt_contains_identity_metadata_conversation_and_system_p
     assert "1000 alice: Please fix this" in prompt
     assert "KANBOARD_STATUS: done or KANBOARD_STATUS: blocked" in prompt
     assert "Your final response from this turn will be posted as a Kanboard card comment" in prompt
+
+
+def test_build_agent_prompt_omits_missing_config_section() -> None:
+    prompt = build_agent_prompt(
+        {"id": "7", "title": "Fix bug", "description": "## Spec\nDo the thing"},
+        worker_username="codex-node1",
+    )
+
+    assert "## Config" not in prompt
+    assert "## Spec\nDo the thing" in prompt

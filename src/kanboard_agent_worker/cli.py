@@ -20,7 +20,6 @@ def main(argv: list[str] | None = None) -> int:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("check", help="Validate config and Kanboard connectivity")
-    subparsers.add_parser("once", help="Claim and run available work once")
     subparsers.add_parser("run", help="Run the polling worker continuously")
 
     args = parser.parse_args(argv)
@@ -34,8 +33,6 @@ def main(argv: list[str] | None = None) -> int:
             for line in worker.check():
                 print(line)
             return 0
-        if args.command == "once":
-            return worker.run_once()
         if args.command == "run":
             worker.run_forever()
             return 0

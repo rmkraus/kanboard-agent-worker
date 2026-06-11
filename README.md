@@ -17,7 +17,7 @@ This is the initial worker skeleton:
 - Kanboard JSON-RPC client using user credentials or a personal access token
 - Worker lifecycle for poll, claim, execute, comment, complete, and block
 - Agent adapters for Codex, Claude, and generic subprocess agents
-- CLI commands for config/API checks, one-shot processing, and continuous polling
+- CLI commands for config/API checks and continuous polling
 
 ## Install
 
@@ -90,12 +90,12 @@ For built-in adapters, `agent.name` selects behavior:
 - `claude`: creates a task session with `claude -n kanboard-{project_id}-{task_id} -p hello`, then runs `claude --resume <session> -p <prompt>`. Claude's stdout is the card response.
 - anything else: generic subprocess runner using `agent.command`.
 
-All adapters receive the same prompt template. It includes the worker username,
-card fields, task metadata, the visible Kanboard comment conversation, the task
-description, and `agent.system_prompt`. The template tells the agent that its
-final response will be posted as a Kanboard card comment and copied into
-`## Output`. The agent must end its final response with exactly one routing
-marker line:
+All adapters receive the same Jinja-rendered prompt template. It includes the
+worker username, card fields, task metadata, the visible Kanboard comment
+conversation, the task description, and `agent.system_prompt`. The template
+tells the agent that its final response will be posted as a Kanboard card
+comment and copied into `## Output`. The agent must end its final response with
+exactly one routing marker line:
 
 ```text
 KANBOARD_STATUS: done
@@ -125,12 +125,6 @@ Check connectivity and board column configuration:
 kanboard-agent-worker --config config.yml check
 ```
 
-Process currently available work once and exit:
-
-```bash
-kanboard-agent-worker --config config.yml once
-```
-
 Run continuously:
 
 ```bash
@@ -158,16 +152,20 @@ If `## Spec` is missing, the worker sends the whole description to the agent.
 
 ## Worker Lifecycle
 
-1. Poll configured boards.
-2. Count tasks assigned to the worker in the working column.
-3. Claim assigned tasks from the todo column until concurrency is full.
-4. Move claimed tasks to the working column.
-5. Build one agent prompt from card metadata, conversation, worker identity, task description, and system prompt.
-6. Run the selected agent wrapper from `agent.pwd`.
-7. Save any emitted thread id in Kanboard task metadata.
-8. Parse and strip `KANBOARD_STATUS` from the wrapper response.
-9. Post the visible response to the Kanboard comments and update `## Output`.
-10. Move `KANBOARD_STATUS: done` tasks to done and `KANBOARD_STATUS: blocked` tasks to blocked. Missing, invalid, or failed responses are blocked.
+1. On startup, move this worker's assigned working-column tasks back to the todo
+   column with a recovery comment.
+2. Poll configured boards.
+3. Count tasks assigned to the worker in the working column.
+4. Claim assigned tasks from the todo column until concurrency is full.
+5. Move claimed tasks to the working column.
+6. Build one agent prompt from card metadata, conversation, worker identity, task
+   description, and system prompt.
+7. Run the selected agent wrapper from `agent.pwd`.
+8. Save any emitted thread id in Kanboard task metadata.
+9. Parse and strip `KANBOARD_STATUS` from the wrapper response.
+10. Post the visible response to the Kanboard comments and update `## Output`.
+11. Move `KANBOARD_STATUS: done` tasks to done and `KANBOARD_STATUS: blocked`
+    tasks to blocked. Missing, invalid, or failed responses are blocked.
 
 ## API Notes
 
