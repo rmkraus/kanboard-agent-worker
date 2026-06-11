@@ -44,7 +44,6 @@ class AgentConfig:
     pwd: str
     system_prompt: str = ""
     timeout_seconds: int = 3600
-    pass_task_on_stdin: bool = True
 
 
 @dataclass(frozen=True)
@@ -129,7 +128,6 @@ def _from_mapping(raw: dict[str, Any], config_dir: Path) -> AppConfig:
         pwd=_agent_pwd(agent_raw, config_dir),
         system_prompt=str(agent_raw.get("system_prompt", "")).strip(),
         timeout_seconds=_positive_int(agent_raw.get("timeout_seconds", 3600), "agent.timeout_seconds"),
-        pass_task_on_stdin=bool(agent_raw.get("pass_task_on_stdin", True)),
     )
 
     boards = tuple(_board_from_mapping(item, index) for index, item in enumerate(boards_raw))

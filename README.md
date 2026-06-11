@@ -4,7 +4,7 @@ A pull-based worker for running local CLI agents from Kanboard tasks.
 
 Each worker is a Kanboard user. It polls configured boards, claims tasks assigned
 to that user from a configured todo column, moves them to a working column,
-runs a local command such as `codex`, `hermes`, or `claude`, posts the agent's
+runs an ACP-compatible local agent such as Codex or Claude, posts the agent's
 final response back to the card, and moves the task to done or blocked.
 
 Kanboard is the shared state layer. There is no central dispatcher.
@@ -16,7 +16,7 @@ This is the initial worker skeleton:
 - YAML configuration for server credentials, board IDs, and per-board column names
 - Kanboard JSON-RPC client using user credentials or a personal access token
 - Worker lifecycle for poll, claim, execute, comment, complete, and block
-- ACP adapters for Codex and Claude, plus a generic subprocess agent
+- ACP agent execution for Codex, Claude, or an explicitly configured ACP command
 - CLI commands for config/API checks and continuous polling
 
 ## Install
@@ -61,7 +61,6 @@ agent:
   command:
     - codex-acp
   timeout_seconds: 3600
-  pass_task_on_stdin: true
 
 boards:
   - id: 1
@@ -90,20 +89,18 @@ auth with the Kanboard username and either password or personal access token.
 Relative paths are resolved from the config file's directory. The directory must
 already exist. Older configs may use `agent.cwd`, but `agent.pwd` is preferred.
 
-For built-in adapters, `agent.name` selects behavior:
+For built-in agents, `agent.name` selects the default ACP command:
 
 - `codex`: starts `codex-acp` by default and communicates through the Agent Client Protocol.
 - `claude`: starts `claude-agent-acp` by default and communicates through the Agent Client Protocol.
-- anything else: generic subprocess runner using `agent.command`.
 
-For `codex` and `claude`, `agent.command` can override the ACP executable. Old
-legacy commands named exactly `codex` or `claude` are ignored so existing configs
-move to the default ACP executables. The built-in ACP adapters expose a Kanboard
-MCP server to the agent with tools to list, download, upload, and delete task
-attachments; create subtasks; and move cards to the configured `todo`,
-`working`, `blocked`, or `done` columns.
+`agent.command` can override the ACP executable. For any other `agent.name`,
+`agent.command` is required and must point at an ACP-compatible process. ACP
+sessions receive a Kanboard MCP server with tools to list, download, upload, and
+delete task attachments; create subtasks; and move cards to the configured
+`todo`, `working`, `blocked`, or `done` columns.
 
-All adapters receive the same Jinja-rendered prompt template. It includes the
+All agents receive the same Jinja-rendered prompt template. It includes the
 worker username, card fields, task metadata, the visible Kanboard comment
 conversation, the configured `roster`, the task description, and
 `agent.system_prompt`. The template
@@ -196,7 +193,7 @@ leaves the parent card in its current column.
 6. Move claimed whole tasks to the working column.
 7. Build one agent prompt from card metadata, conversation, worker identity, task
    description, and system prompt.
-8. Run the selected agent wrapper from `agent.pwd`.
+8. Run the selected ACP agent from `agent.pwd`.
 9. Save any emitted thread id in Kanboard task metadata.
 10. Give ACP agents Kanboard tools for attachments, subtasks, and configured
     column moves.

@@ -21,7 +21,6 @@ agent:
   command:
     - codex-acp
   timeout_seconds: 3600
-  pass_task_on_stdin: true
 
 boards:
   - id: 1

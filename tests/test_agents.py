@@ -7,32 +7,13 @@ from pathlib import Path
 import pytest
 
 from kanboard_agent_worker.agents import (
+    AcpAgent,
     AgentExecResult,
     AgentExecutionError,
-    ClaudeAcpAgentWrapper,
-    CodexAcpAgentWrapper,
-    SubprocessAgentWrapper,
-    create_agent_wrapper,
+    create_acp_agent,
 )
 from kanboard_agent_worker.agents.acp import KanboardAcpClient
 from kanboard_agent_worker.config import AgentConfig, AppConfig, BoardConfig, ServerConfig, WorkerSettings
-
-
-def test_subprocess_wrapper_starts_process_in_configured_pwd(tmp_path: Path) -> None:
-    workdir = tmp_path / "checkout"
-    workdir.mkdir()
-    wrapper = SubprocessAgentWrapper(
-        AgentConfig(
-            name="python",
-            command=(sys.executable, "-c", "import os; print(os.getcwd())"),
-            pwd=str(workdir),
-        )
-    )
-
-    result = wrapper.exec("", "prompt")
-
-    assert result.ok
-    assert result.output == str(workdir)
 
 
 def test_acp_client_terminal_runs_command(tmp_path: Path) -> None:
@@ -54,60 +35,38 @@ def test_acp_client_terminal_runs_command(tmp_path: Path) -> None:
     asyncio.run(run_terminal())
 
 
-@pytest.mark.parametrize("agent_name", ["codex", "claude"])
-def test_wrapper_factory_requires_app_config_for_builtin_acp_agents(tmp_path: Path, agent_name: str) -> None:
-    with pytest.raises(AgentExecutionError, match="requires AppConfig"):
-        create_agent_wrapper(AgentConfig(name=agent_name, command=(), pwd=str(tmp_path)))
-
-
-def test_wrapper_factory_uses_acp_when_app_config_is_available(tmp_path: Path) -> None:
+def test_create_acp_agent_uses_codex_default_command(tmp_path: Path) -> None:
     config = _app_config(tmp_path, agent_name="codex")
 
-    wrapper = create_agent_wrapper(config.agent, config)
+    agent = create_acp_agent(config.agent, config)
 
-    assert isinstance(wrapper, CodexAcpAgentWrapper)
-
-
-def test_codex_acp_wrapper_ignores_legacy_codex_command(tmp_path: Path) -> None:
-    config = _app_config(tmp_path, agent_name="codex", command=("codex",))
-    wrapper = create_agent_wrapper(config.agent, config)
-
-    assert isinstance(wrapper, CodexAcpAgentWrapper)
-    assert wrapper._command() == ("codex-acp",)
+    assert isinstance(agent, AcpAgent)
+    assert agent.command == ("codex-acp",)
 
 
-def test_claude_acp_wrapper_ignores_legacy_claude_command(tmp_path: Path) -> None:
-    config = _app_config(tmp_path, agent_name="claude", command=("claude",))
-    wrapper = create_agent_wrapper(config.agent, config)
-
-    assert isinstance(wrapper, ClaudeAcpAgentWrapper)
-    assert wrapper._command() == ("claude-agent-acp",)
-
-
-def test_codex_acp_wrapper_accepts_explicit_acp_command(tmp_path: Path) -> None:
-    command = ("npx", "-y", "@zed-industries/codex-acp")
-    config = _app_config(tmp_path, agent_name="codex", command=command)
-    wrapper = create_agent_wrapper(config.agent, config)
-
-    assert isinstance(wrapper, CodexAcpAgentWrapper)
-    assert wrapper._command() == command
-
-
-def test_claude_acp_wrapper_accepts_explicit_acp_command(tmp_path: Path) -> None:
-    command = ("npx", "-y", "@agentclientprotocol/claude-agent-acp@0.44.0")
-    config = _app_config(tmp_path, agent_name="claude", command=command)
-    wrapper = create_agent_wrapper(config.agent, config)
-
-    assert isinstance(wrapper, ClaudeAcpAgentWrapper)
-    assert wrapper._command() == command
-
-
-def test_wrapper_factory_uses_claude_acp_when_app_config_is_available(tmp_path: Path) -> None:
+def test_create_acp_agent_uses_claude_default_command(tmp_path: Path) -> None:
     config = _app_config(tmp_path, agent_name="claude")
 
-    wrapper = create_agent_wrapper(config.agent, config)
+    agent = create_acp_agent(config.agent, config)
 
-    assert isinstance(wrapper, ClaudeAcpAgentWrapper)
+    assert isinstance(agent, AcpAgent)
+    assert agent.command == ("claude-agent-acp",)
+
+
+def test_create_acp_agent_accepts_explicit_command(tmp_path: Path) -> None:
+    command = ("npx", "-y", "@zed-industries/codex-acp")
+    config = _app_config(tmp_path, agent_name="codex", command=command)
+
+    agent = create_acp_agent(config.agent, config)
+
+    assert isinstance(agent, AcpAgent)
+    assert agent.command == command
+
+
+def test_create_acp_agent_requires_command_for_unknown_agent(tmp_path: Path) -> None:
+    config = _app_config(tmp_path, agent_name="other")
+    with pytest.raises(AgentExecutionError, match="agent.command is required"):
+        create_acp_agent(config.agent, config)
 
 
 def test_agent_exec_result_card_text_prefers_output() -> None:

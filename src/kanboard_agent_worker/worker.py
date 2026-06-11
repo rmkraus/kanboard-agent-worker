@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from .agents import AgentExecutionError, create_agent_wrapper
+from .agents import AgentExecutionError, create_acp_agent
 from .config import AppConfig, BoardConfig
 from .kanboard import KanboardClient, KanboardError, column_lookup
 from .task_markdown import build_agent_prompt, replace_output_section, summarize_output
@@ -232,8 +232,8 @@ class Worker:
         try:
             comments = self.client.get_all_comments(task_id)
             metadata = self.client.get_task_metadata(task_id)
-            wrapper = self._agent_wrapper()
-            thread_id = self._ensure_agent_thread_id(claimed, wrapper, metadata)
+            agent = self._agent()
+            thread_id = self._agent_thread_id(claimed, metadata)
             prompt = build_agent_prompt(
                 task,
                 comments=comments,
@@ -243,7 +243,7 @@ class Worker:
                 worker_username=self.config.server.user,
                 system_prompt=self.config.agent.system_prompt,
             )
-            result = wrapper.exec(thread_id, prompt)
+            result = agent.exec(thread_id, prompt)
             self._save_agent_thread_id(claimed, result.thread_id)
             card_text = summarize_output(result.card_text())
             self.client.create_comment(task_id, self.user_id, card_text)
@@ -382,10 +382,10 @@ class Worker:
     def _task_has_pending_subtasks(self, task: dict[str, Any]) -> bool:
         return any(_coerce_int(subtask.get("status")) != SUBTASK_STATUS_DONE for subtask in self.client.get_all_subtasks(task["id"]))
 
-    def _agent_wrapper(self):
-        return create_agent_wrapper(self.config.agent, self.config)
+    def _agent(self):
+        return create_acp_agent(self.config.agent, self.config)
 
-    def _ensure_agent_thread_id(self, claimed: ClaimedTask, wrapper, metadata: dict[str, str]) -> str:
+    def _agent_thread_id(self, claimed: ClaimedTask, metadata: dict[str, str]) -> str:
         task = claimed.task
         key = thread_metadata_key(self.config.server.user, claimed.subtask.get("id") if claimed.subtask else None)
         thread_id = metadata.get(key)
@@ -394,12 +394,7 @@ class Worker:
         if thread_id:
             metadata[key] = thread_id
             return thread_id
-
-        thread_id = wrapper.create_thread_id(claimed.board.id, _thread_task_ref(task, claimed.subtask))
-        if thread_id:
-            metadata[key] = thread_id
-            self._save_agent_thread_id(claimed, thread_id)
-        return thread_id
+        return ""
 
     def _save_agent_thread_id(self, claimed: ClaimedTask, thread_id: str | None) -> None:
         if not thread_id:
@@ -437,12 +432,6 @@ def thread_metadata_key(server_user: str, subtask_id: int | str | None = None) -
     if subtask_id is not None:
         return f"kanboard_worker.{server_user}.subtask.{subtask_id}.thread_id"
     return f"kanboard_worker.{server_user}.thread_id"
-
-
-def _thread_task_ref(task: dict[str, Any], subtask: dict[str, Any] | None) -> int | str:
-    if subtask:
-        return f"{task['id']}-subtask-{subtask['id']}"
-    return task["id"]
 
 
 def _coerce_int(value: Any) -> int:

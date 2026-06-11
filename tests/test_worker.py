@@ -46,7 +46,7 @@ def test_worker_saves_changed_agent_thread_id(tmp_path: Path) -> None:
     assert saved == {"42": {"kanboard_worker.codex-node1.thread_id": "thread-123"}}
 
 
-def test_worker_creates_and_saves_missing_thread_id(tmp_path: Path) -> None:
+def test_worker_returns_empty_thread_id_when_metadata_is_missing(tmp_path: Path) -> None:
     saved = {}
 
     class FakeClient:
@@ -56,14 +56,6 @@ def test_worker_creates_and_saves_missing_thread_id(tmp_path: Path) -> None:
         def save_task_metadata(self, task_id, values):
             saved[task_id] = values
 
-    class FakeWrapper:
-        def __init__(self) -> None:
-            self.calls = []
-
-        def create_thread_id(self, project_id, task_id):
-            self.calls.append((project_id, task_id))
-            return "thread-123"
-
     worker = Worker(_config(tmp_path), client=FakeClient())
     claimed = ClaimedTask(
         board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
@@ -71,15 +63,13 @@ def test_worker_creates_and_saves_missing_thread_id(tmp_path: Path) -> None:
         done_column_id=3,
         blocked_column_id=4,
     )
-    wrapper = FakeWrapper()
     metadata = {}
 
-    thread_id = worker._ensure_agent_thread_id(claimed, wrapper, metadata)
+    thread_id = worker._agent_thread_id(claimed, metadata)
 
-    assert thread_id == "thread-123"
-    assert wrapper.calls == [(7, "42")]
-    assert metadata == {"kanboard_worker.codex-node1.thread_id": "thread-123"}
-    assert saved == {"42": {"kanboard_worker.codex-node1.thread_id": "thread-123"}}
+    assert thread_id == ""
+    assert metadata == {}
+    assert saved == {}
 
 
 def test_worker_comments_when_claiming_task(tmp_path: Path) -> None:
@@ -353,10 +343,7 @@ def test_worker_respects_card_move_done_by_agent_tool(tmp_path: Path) -> None:
         def get_task(self, task_id):
             return {"id": task_id, "column_id": 4, "assignee_username": "codex-node1", "swimlane_id": 8}
 
-    class FakeWrapper:
-        def create_thread_id(self, project_id, task_id):
-            raise AssertionError("existing thread id should be reused")
-
+    class FakeAgent:
         def exec(self, thread_id, prompt):
             assert thread_id == "thread-123"
             return AgentExecResult(
@@ -369,7 +356,7 @@ def test_worker_respects_card_move_done_by_agent_tool(tmp_path: Path) -> None:
 
     worker = Worker(_config(tmp_path), client=FakeClient())
     worker._user_id = 9
-    worker._agent_wrapper = lambda: FakeWrapper()
+    worker._agent = lambda: FakeAgent()
     claimed = ClaimedTask(
         board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
         task={"id": "42", "column_id": 2, "description": "## Spec\nDo it\n\n## Output\nold"},
@@ -415,7 +402,7 @@ def test_worker_does_not_complete_parent_when_agent_tool_created_pending_subtask
         def get_all_subtasks(self, task_id):
             return [{"id": "101", "task_id": "42", "title": "Follow-up", "user_id": 11, "status": 0}]
 
-    class FakeWrapper:
+    class FakeAgent:
         def exec(self, thread_id, prompt):
             return AgentExecResult(
                 exit_code=0,
@@ -427,7 +414,7 @@ def test_worker_does_not_complete_parent_when_agent_tool_created_pending_subtask
 
     worker = Worker(_config(tmp_path), client=FakeClient())
     worker._user_id = 9
-    worker._agent_wrapper = lambda: FakeWrapper()
+    worker._agent = lambda: FakeAgent()
     claimed = ClaimedTask(
         board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
         task={"id": "42", "description": "## Spec\nDo it\n\n## Output\nold"},
@@ -474,7 +461,7 @@ def test_worker_completes_subtask_and_comments_on_parent(tmp_path: Path) -> None
         def update_subtask(self, subtask_id, task_id, **values):
             updates.append((subtask_id, task_id, values))
 
-    class FakeWrapper:
+    class FakeAgent:
         def exec(self, thread_id, prompt):
             assert "Subtask #99: Subtask work" in prompt
             return AgentExecResult(
@@ -487,7 +474,7 @@ def test_worker_completes_subtask_and_comments_on_parent(tmp_path: Path) -> None
 
     worker = Worker(_config(tmp_path), client=FakeClient())
     worker._user_id = 9
-    worker._agent_wrapper = lambda: FakeWrapper()
+    worker._agent = lambda: FakeAgent()
     claimed = ClaimedTask(
         board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
         task={"id": "42", "description": "## Spec\nParent"},

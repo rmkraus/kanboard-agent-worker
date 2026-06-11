@@ -1,4 +1,4 @@
-"""ACP agent wrapper and minimal ACP client implementation."""
+"""ACP agent execution and minimal ACP client implementation."""
 
 from __future__ import annotations
 
@@ -41,28 +41,23 @@ from acp.schema import (
     WriteTextFileResponse,
 )
 
-from ..config import AppConfig, BoardConfig
-from .base import AgentExecResult, AgentExecutionError, BaseAgentWrapper
+from ..config import AgentConfig, AppConfig, BoardConfig
+from .base import AgentExecResult, AgentExecutionError
+
+DEFAULT_ACP_COMMANDS = {
+    "codex": "codex-acp",
+    "claude": "claude-agent-acp",
+}
 
 
-class AcpAgentWrapper(BaseAgentWrapper):
+class AcpAgent:
     """Run a single agent turn through an ACP-compatible agent process."""
 
-    def __init__(
-        self,
-        config,
-        app_config: AppConfig,
-        executable: str,
-        legacy_executable: str | None = None,
-    ) -> None:
-        super().__init__(config)
+    def __init__(self, config: AgentConfig, app_config: AppConfig, command: tuple[str, ...]) -> None:
+        self.config = config
         self.app_config = app_config
-        self.executable = executable
-        self.legacy_executable = legacy_executable
+        self.command = command
         self._session_id: str | None = None
-
-    def create_thread_id(self, project_id: int | str, task_id: int | str) -> str:
-        return ""
 
     def exec(self, thread_id: str, prompt: str) -> AgentExecResult:
         try:
@@ -78,11 +73,10 @@ class AcpAgentWrapper(BaseAgentWrapper):
             raise AgentExecutionError(f"ACP agent execution failed: {exc}") from exc
 
     async def _exec_async(self, thread_id: str, prompt: str) -> AgentExecResult:
-        command = self._command()
         client = KanboardAcpClient(Path(self.config.pwd))
         proc = await asyncio.create_subprocess_exec(
-            command[0],
-            *command[1:],
+            self.command[0],
+            *self.command[1:],
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -117,7 +111,7 @@ class AcpAgentWrapper(BaseAgentWrapper):
                 output=client.agent_text(),
                 stdout=client.agent_text(),
                 stderr="",
-                command=tuple(command),
+                command=self.command,
                 thread_id=session_id,
             )
         finally:
@@ -131,13 +125,6 @@ class AcpAgentWrapper(BaseAgentWrapper):
                         await proc.wait()
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(stderr_task, timeout=1)
-
-    def _command(self) -> tuple[str, ...]:
-        if self.config.command:
-            first = Path(self.config.command[0]).name
-            if first != self.legacy_executable:
-                return tuple(self.config.command)
-        return (self.executable,)
 
     async def _session_id_for_turn(self, conn, thread_id: str) -> str:
         cwd = str(Path(self.config.pwd).resolve())
@@ -170,20 +157,6 @@ class AcpAgentWrapper(BaseAgentWrapper):
                 EnvVariable(name="KANBOARD_AGENT_PWD", value=str(Path(self.config.pwd).resolve())),
             ],
         )
-
-
-class CodexAcpAgentWrapper(AcpAgentWrapper):
-    """ACP wrapper for Codex."""
-
-    def __init__(self, config, app_config: AppConfig) -> None:
-        super().__init__(config, app_config, "codex-acp", legacy_executable="codex")
-
-
-class ClaudeAcpAgentWrapper(AcpAgentWrapper):
-    """ACP wrapper for Claude."""
-
-    def __init__(self, config, app_config: AppConfig) -> None:
-        super().__init__(config, app_config, "claude-agent-acp", legacy_executable="claude")
 
 
 class KanboardAcpClient(Client):
@@ -382,3 +355,20 @@ def _terminal_exit_status(returncode: int | None) -> TerminalExitStatus | None:
 
 async def _empty_bytes() -> bytes:
     return b""
+
+
+def create_acp_agent(config: AgentConfig, app_config: AppConfig) -> AcpAgent:
+    """Create an ACP agent runner from config."""
+
+    command = _acp_command(config)
+    return AcpAgent(config, app_config, command)
+
+
+def _acp_command(config: AgentConfig) -> tuple[str, ...]:
+    if config.command:
+        return config.command
+
+    default = DEFAULT_ACP_COMMANDS.get(config.name.lower())
+    if not default:
+        raise AgentExecutionError(f"agent.command is required for ACP agent {config.name!r}")
+    return (default,)
