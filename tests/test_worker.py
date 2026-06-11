@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
-from kanboard_agent_worker.agents import AgentExecResult
+from acp.schema import PromptResponse
+
 from kanboard_agent_worker.config import AgentConfig, AppConfig, BoardConfig, ServerConfig, WorkerSettings
 from kanboard_agent_worker.worker import (
     ClaimedTask,
@@ -119,9 +121,10 @@ def test_worker_comments_when_claiming_task(tmp_path: Path) -> None:
     worker = Worker(_config(tmp_path), client=FakeClient())
     worker._user_id = 9
 
-    claimed = worker.claim_available(limit=1)
+    claimed = worker.claim_next_available()
 
-    assert len(claimed) == 1
+    assert claimed is not None
+    assert claimed.task["id"] == "42"
     assert moves == [(1, "42", 2, 8)]
     assert comments == [("42", 9, WORK_STARTED_COMMENT)]
 
@@ -246,10 +249,10 @@ def test_worker_claims_assigned_subtasks_before_tasks(tmp_path: Path) -> None:
     worker = Worker(_config(tmp_path), client=FakeClient())
     worker._user_id = 9
 
-    claimed = worker.claim_available(limit=1)
+    claimed = worker.claim_next_available()
 
-    assert len(claimed) == 1
-    assert claimed[0].subtask["id"] == "99"
+    assert claimed is not None
+    assert claimed.subtask["id"] == "99"
     assert subtask_updates == [
         (
             "99",
@@ -306,10 +309,32 @@ def test_worker_skips_top_level_tasks_with_pending_subtasks(tmp_path: Path) -> N
     worker = Worker(_config(tmp_path), client=FakeClient())
     worker._user_id = 9
 
-    claimed = worker.claim_available(limit=2)
+    claimed = worker.claim_next_available()
 
-    assert [item.task["id"] for item in claimed] == ["43"]
+    assert claimed is not None
+    assert claimed.task["id"] == "43"
     assert moves == [(1, "43", 2, 8)]
+
+
+def test_worker_iter_claimed_work_yields_until_no_work(tmp_path: Path) -> None:
+    claim = ClaimedTask(
+        board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
+        task={"id": "42"},
+        done_column_id=3,
+        blocked_column_id=4,
+    )
+    claims = [claim]
+
+    class FakePool:
+        is_full = False
+
+    async def collect() -> list[ClaimedTask]:
+        return [item async for item in worker.iter_claimed_work(FakePool())]
+
+    worker = Worker(_config(tmp_path), client=object())
+    worker.claim_next_available = lambda: claims.pop(0) if claims else None
+
+    assert asyncio.run(collect()) == [claim]
 
 
 def test_worker_respects_card_move_done_by_agent_tool(tmp_path: Path) -> None:
@@ -343,20 +368,9 @@ def test_worker_respects_card_move_done_by_agent_tool(tmp_path: Path) -> None:
         def get_task(self, task_id):
             return {"id": task_id, "column_id": 4, "assignee_username": "codex-node1", "swimlane_id": 8}
 
-    class FakeAgent:
-        def exec(self, thread_id, prompt):
-            assert thread_id == "thread-123"
-            return AgentExecResult(
-                exit_code=0,
-                output="Need a human answer before I can continue.",
-                stdout="",
-                stderr="",
-                command=("fake-agent",),
-            )
-
     worker = Worker(_config(tmp_path), client=FakeClient())
     worker._user_id = 9
-    worker._agent = lambda: FakeAgent()
+    _install_fake_acp_session(worker, text="Need a human answer before I can continue.")
     claimed = ClaimedTask(
         board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
         task={"id": "42", "column_id": 2, "description": "## Spec\nDo it\n\n## Output\nold"},
@@ -364,7 +378,7 @@ def test_worker_respects_card_move_done_by_agent_tool(tmp_path: Path) -> None:
         blocked_column_id=4,
     )
 
-    worker.execute_claimed(claimed)
+    asyncio.run(worker.execute_claimed(claimed))
 
     assert comments == ["Need a human answer before I can continue."]
     assert descriptions[-1].strip().endswith("Need a human answer before I can continue.")
@@ -402,19 +416,9 @@ def test_worker_does_not_complete_parent_when_agent_tool_created_pending_subtask
         def get_all_subtasks(self, task_id):
             return [{"id": "101", "task_id": "42", "title": "Follow-up", "user_id": 11, "status": 0}]
 
-    class FakeAgent:
-        def exec(self, thread_id, prompt):
-            return AgentExecResult(
-                exit_code=0,
-                output="Split this into follow-up work and created a subtask.",
-                stdout="",
-                stderr="",
-                command=("fake-agent",),
-            )
-
     worker = Worker(_config(tmp_path), client=FakeClient())
     worker._user_id = 9
-    worker._agent = lambda: FakeAgent()
+    _install_fake_acp_session(worker, text="Split this into follow-up work and created a subtask.")
     claimed = ClaimedTask(
         board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
         task={"id": "42", "description": "## Spec\nDo it\n\n## Output\nold"},
@@ -423,7 +427,7 @@ def test_worker_does_not_complete_parent_when_agent_tool_created_pending_subtask
         blocked_column_id=4,
     )
 
-    worker.execute_claimed(claimed)
+    asyncio.run(worker.execute_claimed(claimed))
 
     assert comments == ["Split this into follow-up work and created a subtask."]
     assert descriptions[-1].strip().endswith("Split this into follow-up work and created a subtask.")
@@ -461,20 +465,13 @@ def test_worker_completes_subtask_and_comments_on_parent(tmp_path: Path) -> None
         def update_subtask(self, subtask_id, task_id, **values):
             updates.append((subtask_id, task_id, values))
 
-    class FakeAgent:
-        def exec(self, thread_id, prompt):
-            assert "Subtask #99: Subtask work" in prompt
-            return AgentExecResult(
-                exit_code=0,
-                output="Subtask complete.",
-                stdout="",
-                stderr="",
-                command=("fake-agent",),
-            )
-
     worker = Worker(_config(tmp_path), client=FakeClient())
     worker._user_id = 9
-    worker._agent = lambda: FakeAgent()
+    _install_fake_acp_session(
+        worker,
+        text="Subtask complete.",
+        prompt_fragment="Subtask #99: Subtask work",
+    )
     claimed = ClaimedTask(
         board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
         task={"id": "42", "description": "## Spec\nParent"},
@@ -483,7 +480,7 @@ def test_worker_completes_subtask_and_comments_on_parent(tmp_path: Path) -> None
         blocked_column_id=4,
     )
 
-    worker.execute_claimed(claimed)
+    asyncio.run(worker.execute_claimed(claimed))
 
     assert comments == [("42", 9, "Subtask complete.")]
     assert stopped_timers == [("99", 9)]
@@ -494,6 +491,51 @@ def test_worker_completes_subtask_and_comments_on_parent(tmp_path: Path) -> None
             {"title": "Subtask work", "user_id": 9, "status": SUBTASK_STATUS_DONE},
         )
     ]
+
+
+class FakeAcpSession:
+    def __init__(
+        self,
+        *,
+        text: str,
+        prompt_fragment: str | None = None,
+        stop_reason: str = "end_turn",
+    ) -> None:
+        self.session_id = "thread-123"
+        self._text = text
+        self._prompt_fragment = prompt_fragment
+        self._response = PromptResponse(stop_reason=stop_reason)
+
+    async def __aenter__(self) -> "FakeAcpSession":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    async def run_turn(self, thread_id: str, prompt: str) -> PromptResponse:
+        assert thread_id == "thread-123"
+        if self._prompt_fragment is not None:
+            assert self._prompt_fragment in prompt
+        return self._response
+
+    def agent_text(self) -> str:
+        return self._text
+
+
+def _install_fake_acp_session(
+    worker: Worker,
+    *,
+    text: str,
+    prompt_fragment: str | None = None,
+    stop_reason: str = "end_turn",
+) -> FakeAcpSession:
+    session = FakeAcpSession(text=text, prompt_fragment=prompt_fragment, stop_reason=stop_reason)
+
+    async def fake_acp_session() -> FakeAcpSession:
+        return session
+
+    worker._acp_session = fake_acp_session
+    return session
 
 
 def _config(tmp_path: Path) -> AppConfig:

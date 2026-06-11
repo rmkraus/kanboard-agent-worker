@@ -1,4 +1,4 @@
-"""ACP agent execution and minimal ACP client implementation."""
+"""ACP session orchestration and client callbacks for Kanboard workers."""
 
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ from acp.schema import (
     Implementation,
     KillTerminalResponse,
     McpServerStdio,
+    PromptResponse,
     ReadTextFileResponse,
     ReleaseTerminalResponse,
     SessionInfoUpdate,
@@ -42,7 +43,6 @@ from acp.schema import (
 )
 
 from ..config import AgentConfig, AppConfig, BoardConfig
-from .base import AgentExecResult, AgentExecutionError
 
 DEFAULT_ACP_COMMANDS = {
     "codex": "codex-acp",
@@ -50,43 +50,71 @@ DEFAULT_ACP_COMMANDS = {
 }
 
 
-class AcpAgent:
-    """Run a single agent turn through an ACP-compatible agent process."""
+class AcpSessionError(RuntimeError):
+    """Raised when an ACP subprocess, connection, or prompt turn fails."""
 
-    def __init__(self, config: AgentConfig, app_config: AppConfig, command: tuple[str, ...]) -> None:
-        self.config = config
-        self.app_config = app_config
-        self.command = command
+
+class AcpSession:
+    """Worker-facing ACP session wrapper around the SDK client callbacks."""
+
+    def __init__(
+        self,
+        *,
+        client: _KanboardAcpClient,
+        command: tuple[str, ...],
+        conn: Any,
+        proc: asyncio.subprocess.Process,
+        stderr_task: asyncio.Task[bytes],
+        timeout_seconds: int,
+        app_config: AppConfig,
+    ) -> None:
+        """Create a connected ACP session wrapper.
+
+        Callers should use ``create`` instead of constructing this class
+        directly, because ``create`` starts the subprocess and initializes the
+        ACP connection.
+        """
+
+        self._client = client
+        self._command = command
+        self._conn = conn
+        self._proc = proc
+        self._stderr_task = stderr_task
+        self._timeout_seconds = timeout_seconds
+        self._app_config = app_config
         self._session_id: str | None = None
 
-    def exec(self, thread_id: str, prompt: str) -> AgentExecResult:
-        try:
-            return asyncio.run(
-                asyncio.wait_for(
-                    self._exec_async(thread_id, prompt),
-                    timeout=self.config.timeout_seconds,
-                )
-            )
-        except TimeoutError as exc:
-            raise AgentExecutionError(f"ACP agent timed out after {self.config.timeout_seconds} seconds") from exc
-        except Exception as exc:
-            raise AgentExecutionError(f"ACP agent execution failed: {exc}") from exc
+    @classmethod
+    async def create(cls, config: AgentConfig, app_config: AppConfig) -> "AcpSession":
+        """Start and initialize an ACP subprocess for one worker turn."""
 
-    async def _exec_async(self, thread_id: str, prompt: str) -> AgentExecResult:
-        client = KanboardAcpClient(Path(self.config.pwd))
+        command = cls.command_for_config(config)
+        root = Path(config.pwd).resolve()
+        client = _KanboardAcpClient(root)
         proc = await asyncio.create_subprocess_exec(
-            self.command[0],
-            *self.command[1:],
+            command[0],
+            *command[1:],
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=self.config.pwd,
+            cwd=str(root),
         )
         if proc.stdin is None or proc.stdout is None:
-            raise AgentExecutionError("ACP agent process did not expose stdio pipes")
+            proc.kill()
+            await proc.wait()
+            raise AcpSessionError("ACP agent process did not expose stdio pipes")
 
         conn = acp.connect_to_agent(client, proc.stdin, proc.stdout)
         stderr_task = asyncio.create_task(proc.stderr.read() if proc.stderr else _empty_bytes())
+        session = cls(
+            client=client,
+            command=command,
+            conn=conn,
+            proc=proc,
+            stderr_task=stderr_task,
+            timeout_seconds=config.timeout_seconds,
+            app_config=app_config,
+        )
 
         try:
             await conn.initialize(
@@ -97,42 +125,102 @@ class AcpAgent:
                 ),
                 client_info=Implementation(name="kanboard-agent-worker", version="0.1.0"),
             )
-            session_id = await self._session_id_for_turn(conn, thread_id)
-            self._session_id = session_id
-            response = await conn.prompt(
-                session_id=session_id,
-                prompt=[text_block(prompt)],
-                message_id=str(uuid.uuid4()),
-            )
-            with contextlib.suppress(Exception):
-                await conn.close_session(session_id)
-            return AgentExecResult(
-                exit_code=0 if response.stop_reason == "end_turn" else 1,
-                output=client.agent_text(),
-                stdout=client.agent_text(),
-                stderr="",
-                command=self.command,
-                thread_id=session_id,
-            )
-        finally:
-            if proc.returncode is None:
-                proc.terminate()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=5)
-                except Exception:
-                    proc.kill()
-                    with contextlib.suppress(Exception):
-                        await proc.wait()
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(stderr_task, timeout=1)
+            return session
+        except Exception:
+            await session.close()
+            raise
 
-    async def _session_id_for_turn(self, conn, thread_id: str) -> str:
-        cwd = str(Path(self.config.pwd).resolve())
+    @staticmethod
+    def command_for_config(config: AgentConfig) -> tuple[str, ...]:
+        """Resolve the ACP executable command for an agent configuration."""
+
+        if config.command:
+            return config.command
+
+        default = DEFAULT_ACP_COMMANDS.get(config.name.lower())
+        if not default:
+            raise AcpSessionError(f"agent.command is required for ACP agent {config.name!r}")
+        return (default,)
+
+    @property
+    def session_id(self) -> str | None:
+        """Return the ACP session id used by the most recent turn."""
+
+        return self._session_id
+
+    @property
+    def command(self) -> tuple[str, ...]:
+        """Return the ACP subprocess command."""
+
+        return self._command
+
+    def agent_text(self) -> str:
+        """Return text accumulated from ACP agent message updates."""
+
+        return self._client._agent_text()
+
+    async def run_turn(self, thread_id: str, prompt: str) -> PromptResponse:
+        """Load or create an ACP session and send one prompt."""
+
+        try:
+            return await asyncio.wait_for(self._run_turn(thread_id, prompt), timeout=self._timeout_seconds)
+        except TimeoutError as exc:
+            raise AcpSessionError(f"ACP agent timed out after {self._timeout_seconds} seconds") from exc
+        except AcpSessionError:
+            raise
+        except Exception as exc:
+            raise AcpSessionError(f"ACP agent execution failed: {exc}") from exc
+
+    async def close(self) -> None:
+        """Terminate the ACP subprocess and any terminal subprocesses."""
+
+        for terminal_id in list(self._client.terminals):
+            await self._client.kill_terminal("", terminal_id)
+
+        if self._proc.returncode is None:
+            self._proc.terminate()
+            try:
+                await asyncio.wait_for(self._proc.wait(), timeout=5)
+            except Exception:
+                self._proc.kill()
+                with contextlib.suppress(Exception):
+                    await self._proc.wait()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(self._stderr_task, timeout=1)
+
+    async def __aenter__(self) -> "AcpSession":
+        """Return this connected session for async context manager use."""
+
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        """Clean up the ACP subprocess when the context exits."""
+
+        await self.close()
+
+    async def _run_turn(self, thread_id: str, prompt: str) -> PromptResponse:
+        """Run one prompt after loading or creating the ACP session."""
+
+        self._client._clear_agent_text()
+        session_id = await self._session_id_for_turn(thread_id)
+        self._session_id = session_id
+        response = await self._conn.prompt(
+            session_id=session_id,
+            prompt=[text_block(prompt)],
+            message_id=str(uuid.uuid4()),
+        )
+        with contextlib.suppress(Exception):
+            await self._conn.close_session(session_id)
+        return response
+
+    async def _session_id_for_turn(self, thread_id: str) -> str:
+        """Load an existing ACP session id or create a fresh session."""
+
         mcp_servers = [self._kanboard_mcp_server()]
         if thread_id:
             try:
-                loaded = await conn.load_session(
-                    cwd=cwd,
+                loaded = await self._conn.load_session(
+                    cwd=str(self._client.root),
                     session_id=thread_id,
                     mcp_servers=mcp_servers,
                 )
@@ -141,30 +229,34 @@ class AcpAgent:
             if loaded is not None:
                 return thread_id
 
-        session = await conn.new_session(cwd=cwd, mcp_servers=mcp_servers)
+        session = await self._conn.new_session(cwd=str(self._client.root), mcp_servers=mcp_servers)
         return session.session_id
 
     def _kanboard_mcp_server(self) -> McpServerStdio:
+        """Build the Kanboard MCP stdio server definition for this worker."""
+
         return McpServerStdio(
             name="kanboard",
             command=sys.executable,
             args=["-m", "kanboard_agent_worker.kanboard_mcp"],
             env=[
-                EnvVariable(name="KANBOARD_URL", value=self.app_config.server.url),
-                EnvVariable(name="KANBOARD_USER", value=self.app_config.server.user),
-                EnvVariable(name="KANBOARD_TOKEN", value=self.app_config.server.token),
-                EnvVariable(name="KANBOARD_WORKER_BOARDS", value=_boards_env(self.app_config.boards)),
-                EnvVariable(name="KANBOARD_AGENT_PWD", value=str(Path(self.config.pwd).resolve())),
+                EnvVariable(name="KANBOARD_URL", value=self._app_config.server.url),
+                EnvVariable(name="KANBOARD_USER", value=self._app_config.server.user),
+                EnvVariable(name="KANBOARD_TOKEN", value=self._app_config.server.token),
+                EnvVariable(name="KANBOARD_WORKER_BOARDS", value=_boards_env(self._app_config.boards)),
+                EnvVariable(name="KANBOARD_AGENT_PWD", value=str(self._client.root)),
             ],
         )
 
 
-class KanboardAcpClient(Client):
-    """ACP client that exposes a constrained local filesystem and terminal."""
+class _KanboardAcpClient(Client):
+    """ACP client callbacks for filesystem, terminal, and session updates."""
 
     def __init__(self, root: Path) -> None:
+        """Create callback state rooted at the configured agent directory."""
+
         self.root = root.resolve()
-        self.messages: list[str] = []
+        self._messages: list[str] = []
         self.terminals: dict[str, TerminalState] = {}
 
     async def session_update(
@@ -183,8 +275,10 @@ class KanboardAcpClient(Client):
         | UsageUpdate,
         **kwargs: Any,
     ) -> None:
+        """Record agent message chunks emitted by the ACP server."""
+
         if isinstance(update, AgentMessageChunk) and isinstance(update.content, TextContentBlock):
-            self.messages.append(update.content.text)
+            self._messages.append(update.content.text)
 
     async def read_text_file(
         self,
@@ -194,6 +288,8 @@ class KanboardAcpClient(Client):
         line: int | None = None,
         **kwargs: Any,
     ) -> ReadTextFileResponse:
+        """Read a UTF-8 file from inside the configured agent directory."""
+
         target = self._path(path)
         text = target.read_text(encoding="utf-8")
         if line is not None:
@@ -203,6 +299,8 @@ class KanboardAcpClient(Client):
         return ReadTextFileResponse(content=text)
 
     async def write_text_file(self, content: str, path: str, session_id: str, **kwargs: Any) -> WriteTextFileResponse:
+        """Write a UTF-8 file inside the configured agent directory."""
+
         target = self._path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
@@ -218,6 +316,8 @@ class KanboardAcpClient(Client):
         output_byte_limit: int | None = None,
         **kwargs: Any,
     ) -> CreateTerminalResponse:
+        """Start a terminal command rooted inside the configured directory."""
+
         terminal_id = str(uuid.uuid4())
         run_env = os.environ.copy()
         for item in env or []:
@@ -243,6 +343,8 @@ class KanboardAcpClient(Client):
         return CreateTerminalResponse(terminal_id=terminal_id)
 
     async def terminal_output(self, session_id: str, terminal_id: str, **kwargs: Any) -> TerminalOutputResponse:
+        """Return buffered terminal output when the command has finished."""
+
         state = self.terminals[terminal_id]
         output = ""
         truncated = False
@@ -260,6 +362,8 @@ class KanboardAcpClient(Client):
         terminal_id: str,
         **kwargs: Any,
     ) -> WaitForTerminalExitResponse:
+        """Wait until a terminal command exits."""
+
         state = self.terminals[terminal_id]
         await state.output_task
         if state.proc.returncode is not None and state.proc.returncode < 0:
@@ -272,6 +376,8 @@ class KanboardAcpClient(Client):
         terminal_id: str,
         **kwargs: Any,
     ) -> ReleaseTerminalResponse | None:
+        """Forget a terminal command and stop it if it is still running."""
+
         state = self.terminals.pop(terminal_id, None)
         if state and state.proc.returncode is None:
             state.proc.kill()
@@ -280,6 +386,8 @@ class KanboardAcpClient(Client):
         return ReleaseTerminalResponse()
 
     async def kill_terminal(self, session_id: str, terminal_id: str, **kwargs: Any) -> KillTerminalResponse | None:
+        """Kill a terminal command started by the ACP server."""
+
         state = self.terminals.pop(terminal_id, None)
         if state and state.proc.returncode is None:
             state.proc.kill()
@@ -288,18 +396,33 @@ class KanboardAcpClient(Client):
         return KillTerminalResponse()
 
     async def request_permission(self, *args, **kwargs):
+        """Reject unsupported ACP permission requests."""
+
         raise RequestError.method_not_found("session/request_permission")
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Reject unsupported ACP extension methods."""
+
         raise RequestError.method_not_found(method)
 
     async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
+        """Reject unsupported ACP extension notifications."""
+
         raise RequestError.method_not_found(method)
 
-    def agent_text(self) -> str:
-        return "".join(self.messages).strip()
+    def _agent_text(self) -> str:
+        """Return accumulated agent message text."""
+
+        return "".join(self._messages).strip()
+
+    def _clear_agent_text(self) -> None:
+        """Clear accumulated agent message text before a new prompt."""
+
+        self._messages.clear()
 
     def _path(self, path: str) -> Path:
+        """Resolve a path and ensure it stays under the configured root."""
+
         target = Path(path).expanduser()
         if not target.is_absolute():
             target = self.root / target
@@ -311,7 +434,18 @@ class KanboardAcpClient(Client):
         return target
 
 
+@dataclass
+class TerminalState:
+    """State tracked for an ACP terminal command."""
+
+    proc: asyncio.subprocess.Process
+    output_task: asyncio.Task[tuple[bytes, bytes]]
+    output_byte_limit: int | None
+
+
 def _boards_env(boards: tuple[BoardConfig, ...]) -> str:
+    """Serialize board column configuration for the Kanboard MCP server."""
+
     import json
 
     return json.dumps(
@@ -328,14 +462,9 @@ def _boards_env(boards: tuple[BoardConfig, ...]) -> str:
     )
 
 
-@dataclass
-class TerminalState:
-    proc: asyncio.subprocess.Process
-    output_task: asyncio.Task[tuple[bytes, bytes]]
-    output_byte_limit: int | None
-
-
 def _terminal_output(state: TerminalState) -> tuple[str, bool]:
+    """Decode buffered terminal output and apply any byte limit."""
+
     stdout, stderr = state.output_task.result()
     output = (stdout or b"").decode(errors="replace")
     if stderr:
@@ -346,6 +475,8 @@ def _terminal_output(state: TerminalState) -> tuple[str, bool]:
 
 
 def _terminal_exit_status(returncode: int | None) -> TerminalExitStatus | None:
+    """Convert a process return code into an ACP terminal exit status."""
+
     if returncode is None:
         return None
     if returncode < 0:
@@ -354,21 +485,6 @@ def _terminal_exit_status(returncode: int | None) -> TerminalExitStatus | None:
 
 
 async def _empty_bytes() -> bytes:
+    """Return empty stderr bytes when a subprocess has no stderr pipe."""
+
     return b""
-
-
-def create_acp_agent(config: AgentConfig, app_config: AppConfig) -> AcpAgent:
-    """Create an ACP agent runner from config."""
-
-    command = _acp_command(config)
-    return AcpAgent(config, app_config, command)
-
-
-def _acp_command(config: AgentConfig) -> tuple[str, ...]:
-    if config.command:
-        return config.command
-
-    default = DEFAULT_ACP_COMMANDS.get(config.name.lower())
-    if not default:
-        raise AgentExecutionError(f"agent.command is required for ACP agent {config.name!r}")
-    return (default,)

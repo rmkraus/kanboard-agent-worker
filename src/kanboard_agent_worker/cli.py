@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import sys
 
@@ -34,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(line)
             return 0
         if args.command == "run":
-            worker.run_forever()
+            asyncio.run(worker.run_forever())
             return 0
     except (ConfigError, KanboardError) as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-from .acp import AcpAgent, KanboardAcpClient, create_acp_agent
-from .base import AgentExecResult, AgentExecutionError
+from .acp import AcpSession, AcpSessionError
 
 __all__ = [
-    "AcpAgent",
-    "AgentExecResult",
-    "AgentExecutionError",
-    "KanboardAcpClient",
-    "create_acp_agent",
+    "AcpSession",
+    "AcpSessionError",
 ]

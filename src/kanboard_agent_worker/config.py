@@ -37,7 +37,7 @@ class BoardConfig:
 
 @dataclass(frozen=True)
 class AgentConfig:
-    """Local CLI agent execution settings."""
+    """ACP agent execution settings."""
 
     name: str
     command: tuple[str, ...]

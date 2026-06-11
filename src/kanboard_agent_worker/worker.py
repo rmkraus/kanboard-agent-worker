@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-import concurrent.futures
+import asyncio
 import logging
-import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
-from .agents import AgentExecutionError, create_acp_agent
+from acp.schema import PromptResponse
+from asyncio_pool import AioPool
+
+from .agents import AcpSession, AcpSessionError
 from .config import AppConfig, BoardConfig
 from .kanboard import KanboardClient, KanboardError, column_lookup
 from .task_markdown import build_agent_prompt, replace_output_section, summarize_output
@@ -71,53 +74,47 @@ class Worker:
             lines.append(f"Roster {entry.name}: Kanboard user id={user.get('id')}")
         return lines
 
-    def run_forever(self) -> None:
+    async def run_forever(self) -> None:
         """Poll indefinitely, executing claimed work up to the concurrency limit."""
 
-        self.recover_in_process_tasks()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.worker.max_concurrency) as executor:
-            futures: set[concurrent.futures.Future[None]] = set()
+        await asyncio.to_thread(self.recover_in_process_tasks)
+        async with AioPool(size=self.config.worker.max_concurrency) as pool:
             while True:
-                futures = self._collect_done_futures(futures)
-                capacity = self._remaining_capacity()
-                if capacity > 0:
-                    for claimed in self.claim_available(limit=capacity):
-                        futures.add(executor.submit(self.execute_claimed, claimed))
+                claimed_any = False
+                async for claimed in self.iter_claimed_work(pool):
+                    claimed_any = True
+                    await pool.spawn(self.execute_claimed(claimed), cb=self._log_execution_failure)
+                if not claimed_any:
+                    await asyncio.sleep(self.config.worker.poll_interval)
 
-                time.sleep(self.config.worker.poll_interval)
+    async def iter_claimed_work(self, pool: AioPool) -> AsyncIterator[ClaimedTask]:
+        """Yield claimed work while the pool has room and Kanboard has work."""
 
-    def claim_available(self, limit: int) -> list[ClaimedTask]:
-        """Claim up to ``limit`` assigned tasks from configured todo columns."""
+        while True:
+            while pool.is_full:
+                await asyncio.sleep(min(1, self.config.worker.poll_interval))
+            claimed = await asyncio.to_thread(self.claim_next_available)
+            if claimed is None:
+                return
+            yield claimed
 
-        claimed = self.claim_available_subtasks(limit)
-        if len(claimed) >= limit:
-            return claimed
+    def claim_next_available(self) -> ClaimedTask | None:
+        """Claim and return the next available unit of work, if one exists."""
 
-        claimed.extend(self.claim_available_tasks(limit - len(claimed)))
-        return claimed
+        return self.claim_next_subtask() or self.claim_next_task()
 
-    def claim_available_tasks(self, limit: int) -> list[ClaimedTask]:
-        """Claim up to ``limit`` assigned top-level tasks from configured todo columns."""
+    def claim_next_task(self) -> ClaimedTask | None:
+        """Claim the next assigned top-level task from a configured todo column."""
 
-        claimed: list[ClaimedTask] = []
         for board in self.config.boards:
-            if len(claimed) >= limit:
-                break
-
             lookup = self._lookup_columns(board)
             board_tasks = self._tasks_by_column(board)
-            working_count = self._assigned_count(board_tasks.get(str(lookup.working["id"]), []))
-            remaining_for_board = max(0, self.config.worker.max_concurrency - working_count)
-            remaining = min(limit - len(claimed), remaining_for_board)
-            if remaining < 1:
-                continue
-
-            todo_tasks = [
+            todo_tasks = (
                 task
                 for task in self._assigned_tasks(board_tasks.get(str(lookup.todo["id"]), []))
                 if not self._task_has_pending_subtasks(task)
-            ]
-            for task in todo_tasks[:remaining]:
+            )
+            for task in todo_tasks:
                 self.client.move_task_to_column(
                     project_id=board.id,
                     task_id=task["id"],
@@ -125,38 +122,24 @@ class Worker:
                     swimlane_id=task.get("swimlane_id", 0),
                 )
                 self.client.create_comment(task["id"], self.user_id, WORK_STARTED_COMMENT)
-                claimed.append(
-                    ClaimedTask(
-                        board=board,
-                        task=self.client.get_task(task["id"]),
-                        todo_column_id=lookup.todo["id"],
-                        done_column_id=lookup.done["id"],
-                        blocked_column_id=lookup.blocked["id"],
-                    )
+                return ClaimedTask(
+                    board=board,
+                    task=self.client.get_task(task["id"]),
+                    todo_column_id=lookup.todo["id"],
+                    done_column_id=lookup.done["id"],
+                    blocked_column_id=lookup.blocked["id"],
                 )
-                if len(claimed) >= limit:
-                    break
 
-        return claimed
+        return None
 
-    def claim_available_subtasks(self, limit: int) -> list[ClaimedTask]:
-        """Claim assigned todo subtasks from any column before whole-task work."""
+    def claim_next_subtask(self) -> ClaimedTask | None:
+        """Claim the next assigned todo subtask from any configured board column."""
 
-        claimed: list[ClaimedTask] = []
         user_id = self.user_id
         for board in self.config.boards:
-            if len(claimed) >= limit:
-                break
-
             lookup = self._lookup_columns(board)
             for task in self._all_board_tasks(board):
-                if len(claimed) >= limit:
-                    break
-
                 for subtask in self._assigned_subtasks(task, status=SUBTASK_STATUS_TODO):
-                    if len(claimed) >= limit:
-                        break
-
                     self.client.update_subtask(
                         subtask["id"],
                         task["id"],
@@ -173,18 +156,16 @@ class Worker:
                             title=subtask.get("title", ""),
                         ),
                     )
-                    claimed.append(
-                        ClaimedTask(
-                            board=board,
-                            task=self.client.get_task(task["id"]),
-                            subtask={**subtask, "status": SUBTASK_STATUS_IN_PROGRESS},
-                            todo_column_id=lookup.todo["id"],
-                            done_column_id=lookup.done["id"],
-                            blocked_column_id=lookup.blocked["id"],
-                        )
+                    return ClaimedTask(
+                        board=board,
+                        task=self.client.get_task(task["id"]),
+                        subtask={**subtask, "status": SUBTASK_STATUS_IN_PROGRESS},
+                        todo_column_id=lookup.todo["id"],
+                        done_column_id=lookup.done["id"],
+                        blocked_column_id=lookup.blocked["id"],
                     )
 
-        return claimed
+        return None
 
     def recover_in_process_tasks(self) -> int:
         """Return this worker's assigned in-process tasks to the todo columns."""
@@ -223,17 +204,16 @@ class Worker:
             LOGGER.info("Recovered %s in-process task(s) back to the queue", recovered)
         return recovered
 
-    def execute_claimed(self, claimed: ClaimedTask) -> None:
+    async def execute_claimed(self, claimed: ClaimedTask) -> None:
         """Run the configured agent for one claimed task and route the card."""
 
         task = claimed.task
         task_id = task["id"]
 
         try:
-            comments = self.client.get_all_comments(task_id)
-            metadata = self.client.get_task_metadata(task_id)
-            agent = self._agent()
-            thread_id = self._agent_thread_id(claimed, metadata)
+            comments = await asyncio.to_thread(self.client.get_all_comments, task_id)
+            metadata = await asyncio.to_thread(self.client.get_task_metadata, task_id)
+            thread_id = await asyncio.to_thread(self._agent_thread_id, claimed, metadata)
             prompt = build_agent_prompt(
                 task,
                 comments=comments,
@@ -243,31 +223,33 @@ class Worker:
                 worker_username=self.config.server.user,
                 system_prompt=self.config.agent.system_prompt,
             )
-            result = agent.exec(thread_id, prompt)
-            self._save_agent_thread_id(claimed, result.thread_id)
-            card_text = summarize_output(result.card_text())
-            self.client.create_comment(task_id, self.user_id, card_text)
+            async with await self._acp_session() as session:
+                response = await session.run_turn(thread_id, prompt)
+                await asyncio.to_thread(self._save_agent_thread_id, claimed, session.session_id)
+                card_text = summarize_output(session.agent_text())
+
+            await asyncio.to_thread(self.client.create_comment, task_id, self.user_id, card_text)
 
             if claimed.subtask:
-                self._route_subtask_result(claimed, result)
+                await asyncio.to_thread(self._route_subtask_result, claimed, response)
                 return
 
             updated = replace_output_section(str(task.get("description") or ""), card_text)
-            self.client.update_task_description(task_id, updated)
+            await asyncio.to_thread(self.client.update_task_description, task_id, updated)
 
-            if not result.ok:
-                self._block_task(claimed, f"Agent exited with code {result.exit_code}.")
-            elif self._agent_moved_task(claimed):
+            if response.stop_reason != "end_turn":
+                await asyncio.to_thread(self._block_task, claimed, f"Agent stopped with reason {response.stop_reason}.")
+            elif await asyncio.to_thread(self._agent_moved_task, claimed):
                 return
-            elif self._task_has_pending_subtasks(task):
+            elif await asyncio.to_thread(self._task_has_pending_subtasks, task):
                 return
             else:
-                self._move_task_to_column(claimed, claimed.done_column_id)
-        except (AgentExecutionError, KanboardError, Exception) as exc:
+                await asyncio.to_thread(self._move_task_to_column, claimed, claimed.done_column_id)
+        except (AcpSessionError, KanboardError, Exception) as exc:
             if claimed.subtask:
-                self._block_subtask(claimed, f"Worker error: {exc}")
+                await asyncio.to_thread(self._block_subtask, claimed, f"Worker error: {exc}")
             else:
-                self._block_task(claimed, f"Worker error: {exc}")
+                await asyncio.to_thread(self._block_task, claimed, f"Worker error: {exc}")
             raise
 
     def _block_task(self, claimed: ClaimedTask, message: str) -> None:
@@ -277,15 +259,17 @@ class Worker:
         self.client.create_comment(task_id, self.user_id, message)
         self._move_task_to_column(claimed, claimed.blocked_column_id)
 
-    def _route_subtask_result(self, claimed: ClaimedTask, result) -> None:
+    def _route_subtask_result(self, claimed: ClaimedTask, response: PromptResponse) -> None:
+        """Stop subtask timing and update subtask state after an ACP turn."""
+
         if not claimed.subtask:
             return
 
         if self.client.has_subtask_timer(claimed.subtask["id"], self.user_id):
             self.client.stop_subtask_timer(claimed.subtask["id"], self.user_id)
 
-        if not result.ok:
-            self._block_subtask(claimed, f"Agent exited with code {result.exit_code}.")
+        if response.stop_reason != "end_turn":
+            self._block_subtask(claimed, f"Agent stopped with reason {response.stop_reason}.")
         else:
             self.client.update_subtask(
                 claimed.subtask["id"],
@@ -348,23 +332,8 @@ class Worker:
             tasks.extend(column_tasks)
         return tasks
 
-    def _remaining_capacity(self) -> int:
-        working = 0
-        for board in self.config.boards:
-            lookup = self._lookup_columns(board)
-            tasks = self._tasks_by_column(board)
-            working += self._assigned_count(tasks.get(str(lookup.working["id"]), []))
-            working += self._assigned_subtask_count(
-                self._all_tasks_from_columns(tasks),
-                status=SUBTASK_STATUS_IN_PROGRESS,
-            )
-        return max(0, self.config.worker.max_concurrency - working)
-
     def _assigned_tasks(self, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [task for task in tasks if task.get("assignee_username") == self.config.server.user]
-
-    def _assigned_count(self, tasks: list[dict[str, Any]]) -> int:
-        return len(self._assigned_tasks(tasks))
 
     def _assigned_subtasks(self, task: dict[str, Any], status: int | None = None) -> list[dict[str, Any]]:
         subtasks = []
@@ -376,14 +345,13 @@ class Worker:
             subtasks.append(subtask)
         return subtasks
 
-    def _assigned_subtask_count(self, tasks: list[dict[str, Any]], status: int | None = None) -> int:
-        return sum(len(self._assigned_subtasks(task, status=status)) for task in tasks)
-
     def _task_has_pending_subtasks(self, task: dict[str, Any]) -> bool:
         return any(_coerce_int(subtask.get("status")) != SUBTASK_STATUS_DONE for subtask in self.client.get_all_subtasks(task["id"]))
 
-    def _agent(self):
-        return create_acp_agent(self.config.agent, self.config)
+    async def _acp_session(self) -> AcpSession:
+        """Create a connected ACP session for the configured worker agent."""
+
+        return await AcpSession.create(self.config.agent, self.config)
 
     def _agent_thread_id(self, claimed: ClaimedTask, metadata: dict[str, str]) -> str:
         task = claimed.task
@@ -411,19 +379,12 @@ class Worker:
         current = self.client.get_task(claimed.task["id"])
         return str(current.get("column_id")) != str(claimed.task.get("column_id"))
 
-    def _collect_done_futures(
-        self, futures: set[concurrent.futures.Future[None]]
-    ) -> set[concurrent.futures.Future[None]]:
-        active = set()
-        for future in futures:
-            if not future.done():
-                active.add(future)
-                continue
-            try:
-                future.result()
-            except Exception:
-                LOGGER.exception("Background task execution failed")
-        return active
+    async def _log_execution_failure(self, result: Any, error: tuple[BaseException, str] | None, context: Any) -> None:
+        """Log exceptions raised by a pooled task execution."""
+
+        if error:
+            exc, traceback_text = error
+            LOGGER.error("Background task execution failed: %s\n%s", exc, traceback_text)
 
 
 def thread_metadata_key(server_user: str, subtask_id: int | str | None = None) -> str:
