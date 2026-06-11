@@ -30,8 +30,7 @@ def test_build_agent_prompt_contains_identity_metadata_conversation_and_system_p
     assert "Kanboard tool use:" in prompt
     assert "Handoff work to another agent with add_subtask" in prompt
     assert (
-        "Manage shared files with list_attachments, get_attachment, upload_attachment, and delete_attachment"
-        in prompt
+        "Manage shared files with list_attachments, get_attachment, upload_attachment, and delete_attachment" in prompt
     )
     assert "Share links, attachment references, and coordination notes with add_comment" in prompt
     assert "Use move_column only for intentional workflow routing" in prompt

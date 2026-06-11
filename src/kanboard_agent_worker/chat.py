@@ -67,24 +67,24 @@ class _AcpClient(Client):
     async def session_update(
         self,
         session_id: str,
-        update: UserMessageChunk
-        | AgentMessageChunk
-        | AgentThoughtChunk
-        | ToolCallStart
-        | ToolCallProgress
-        | AgentPlanUpdate
-        | AvailableCommandsUpdate
-        | CurrentModeUpdate
-        | ConfigOptionUpdate
-        | SessionInfoUpdate
-        | UsageUpdate,
+        update: (
+            UserMessageChunk
+            | AgentMessageChunk
+            | AgentThoughtChunk
+            | ToolCallStart
+            | ToolCallProgress
+            | AgentPlanUpdate
+            | AvailableCommandsUpdate
+            | CurrentModeUpdate
+            | ConfigOptionUpdate
+            | SessionInfoUpdate
+            | UsageUpdate
+        ),
         **kwargs: Any,
     ) -> None:
         """Record agent message chunks emitted by the ACP server."""
 
-        if isinstance(update, AgentMessageChunk) and isinstance(
-            update.content, TextContentBlock
-        ):
+        if isinstance(update, AgentMessageChunk) and isinstance(update.content, TextContentBlock):
             self._messages.append(update.content.text)
 
     async def read_text_file(
@@ -105,9 +105,7 @@ class _AcpClient(Client):
             text = text[:limit]
         return ReadTextFileResponse(content=text)
 
-    async def write_text_file(
-        self, content: str, path: str, session_id: str, **kwargs: Any
-    ) -> WriteTextFileResponse:
+    async def write_text_file(self, content: str, path: str, session_id: str, **kwargs: Any) -> WriteTextFileResponse:
         """Write a UTF-8 file inside the configured agent directory."""
 
         target = self._path(path)
@@ -156,9 +154,7 @@ class _AcpClient(Client):
         )
         return CreateTerminalResponse(terminal_id=terminal_id)
 
-    async def terminal_output(
-        self, session_id: str, terminal_id: str, **kwargs: Any
-    ) -> TerminalOutputResponse:
+    async def terminal_output(self, session_id: str, terminal_id: str, **kwargs: Any) -> TerminalOutputResponse:
         """Return buffered terminal output when the command has finished."""
 
         state = self.terminals[terminal_id]
@@ -201,9 +197,7 @@ class _AcpClient(Client):
                 await state.output_task
         return ReleaseTerminalResponse()
 
-    async def kill_terminal(
-        self, session_id: str, terminal_id: str, **kwargs: Any
-    ) -> KillTerminalResponse | None:
+    async def kill_terminal(self, session_id: str, terminal_id: str, **kwargs: Any) -> KillTerminalResponse | None:
         """Kill a terminal command started by the ACP server."""
 
         state = self.terminals.pop(terminal_id, None)
@@ -295,9 +289,7 @@ class AcpSession:
         self._session_id: str | None = session_id or None
 
     @classmethod
-    async def create(
-        cls, config: AgentConfig, app_config: AppConfig, session_id: str = ""
-    ) -> AcpSession:
+    async def create(cls, config: AgentConfig, app_config: AppConfig, session_id: str = "") -> AcpSession:
         """Start and initialize an ACP subprocess for one worker turn."""
 
         command = cls._command_for_config(config)
@@ -317,9 +309,7 @@ class AcpSession:
             raise AcpSessionError("ACP agent process did not expose stdio pipes")
 
         conn = acp.connect_to_agent(client, proc.stdin, proc.stdout)
-        stderr_task = asyncio.create_task(
-            proc.stderr.read() if proc.stderr else _empty_bytes()
-        )
+        stderr_task = asyncio.create_task(proc.stderr.read() if proc.stderr else _empty_bytes())
         session = cls(
             client=client,
             command=command,
@@ -335,14 +325,10 @@ class AcpSession:
             await conn.initialize(
                 protocol_version=PROTOCOL_VERSION,
                 client_capabilities=ClientCapabilities(
-                    fs=FileSystemCapabilities(
-                        read_text_file=True, write_text_file=True
-                    ),
+                    fs=FileSystemCapabilities(read_text_file=True, write_text_file=True),
                     terminal=True,
                 ),
-                client_info=Implementation(
-                    name="kanboard-agent-worker", version="0.1.0"
-                ),
+                client_info=Implementation(name="kanboard-agent-worker", version="0.1.0"),
             )
             return session
         except Exception:
@@ -358,9 +344,7 @@ class AcpSession:
 
         default = DEFAULT_ACP_COMMANDS.get(config.name.lower())
         if not default:
-            raise AcpSessionError(
-                f"agent.command is required for ACP agent {config.name!r}"
-            )
+            raise AcpSessionError(f"agent.command is required for ACP agent {config.name!r}")
         return (default,)
 
     @property
@@ -384,13 +368,9 @@ class AcpSession:
         """Load or create this wrapper's ACP session and send one prompt."""
 
         try:
-            return await asyncio.wait_for(
-                self._run_turn(prompt), timeout=self._timeout_seconds
-            )
+            return await asyncio.wait_for(self._run_turn(prompt), timeout=self._timeout_seconds)
         except TimeoutError as exc:
-            raise AcpSessionError(
-                f"ACP agent timed out after {self._timeout_seconds} seconds"
-            ) from exc
+            raise AcpSessionError(f"ACP agent timed out after {self._timeout_seconds} seconds") from exc
         except AcpSessionError:
             raise
         except Exception as exc:
@@ -450,9 +430,7 @@ class AcpSession:
             )
             return self._session_id
 
-        session = await self._conn.new_session(
-            cwd=str(self._client.root), mcp_servers=mcp_servers
-        )
+        session = await self._conn.new_session(cwd=str(self._client.root), mcp_servers=mcp_servers)
         return session.session_id
 
     def _kanboard_mcp_server(self) -> McpServerStdio:
@@ -510,10 +488,7 @@ def _terminal_output(state: TerminalState) -> tuple[str, bool]:
     output = (stdout or b"").decode(errors="replace")
     if stderr:
         output += "\n" + stderr.decode(errors="replace")
-    if (
-        state.output_byte_limit is None
-        or len(output.encode()) <= state.output_byte_limit
-    ):
+    if state.output_byte_limit is None or len(output.encode()) <= state.output_byte_limit:
         return output, False
     return output.encode()[: state.output_byte_limit].decode(errors="replace"), True
 

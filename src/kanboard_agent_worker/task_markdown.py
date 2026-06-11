@@ -147,11 +147,7 @@ def _merged_system_prompt(system_prompt: str) -> str:
 
 def _card_metadata_json(task: dict[str, Any], metadata: dict[str, str]) -> str:
     card_metadata = {
-        "task": {
-            key: value
-            for key, value in sorted(task.items())
-            if key not in {"description", "comment"}
-        },
+        "task": {key: value for key, value in sorted(task.items()) if key not in {"description", "comment"}},
         "task_metadata": metadata,
     }
     return "```json\n" + json.dumps(card_metadata, indent=2, sort_keys=True, default=str) + "\n```"

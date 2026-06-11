@@ -26,5 +26,8 @@ jobs:
       - name: Lint
         run: python -m ruff check src tests
 
+      - name: Check formatting
+        run: python -m black --check src tests
+
       - name: Test
         run: python -m pytest
