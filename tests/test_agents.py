@@ -7,9 +7,6 @@ from kanboard_agent_worker.agents import (
     ClaudeAgentWrapper,
     CodexAgentWrapper,
     SubprocessAgentWrapper,
-    final_agent_text_from_events,
-    parse_jsonl_events,
-    thread_id_from_events,
 )
 from kanboard_agent_worker.config import AgentConfig
 
@@ -76,7 +73,7 @@ print(" ".join(sys.argv[1:]))
 
 
 def test_parse_codex_jsonl_helpers() -> None:
-    events = parse_jsonl_events(
+    events = CodexAgentWrapper._parse_jsonl_events(
         """
 {"type":"thread.started","thread_id":"abc"}
 not-json
@@ -84,5 +81,5 @@ not-json
 """
     )
 
-    assert thread_id_from_events(events) == "abc"
-    assert final_agent_text_from_events(events) == "done"
+    assert CodexAgentWrapper._thread_id_from_events(events) == "abc"
+    assert CodexAgentWrapper._final_agent_text_from_events(events) == "done"
