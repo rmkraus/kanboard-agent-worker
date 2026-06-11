@@ -99,7 +99,7 @@ final response will be posted as a Kanboard card comment and copied into
 Codex and Claude metadata is stored per Kanboard worker identity:
 
 ```text
-kanboard_agent.{server.user}.thread_id
+kanboard_worker.{server.user}.thread_id
 ```
 
 ## Run

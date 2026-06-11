@@ -7,7 +7,7 @@ from kanboard_agent_worker.worker import ClaimedTask, Worker, thread_metadata_ke
 
 
 def test_thread_metadata_key_uses_server_user() -> None:
-    assert thread_metadata_key("codex-node1") == "kanboard_agent.codex-node1.thread_id"
+    assert thread_metadata_key("codex-node1") == "kanboard_worker.codex-node1.thread_id"
 
 
 def test_worker_saves_changed_agent_thread_id(tmp_path: Path) -> None:
@@ -24,7 +24,7 @@ def test_worker_saves_changed_agent_thread_id(tmp_path: Path) -> None:
 
     worker._save_agent_thread_id({"id": "42"}, "thread-123")
 
-    assert saved == {"42": {"kanboard_agent.codex-node1.thread_id": "thread-123"}}
+    assert saved == {"42": {"kanboard_worker.codex-node1.thread_id": "thread-123"}}
 
 
 def test_worker_creates_and_saves_missing_thread_id(tmp_path: Path) -> None:
@@ -59,8 +59,8 @@ def test_worker_creates_and_saves_missing_thread_id(tmp_path: Path) -> None:
 
     assert thread_id == "thread-123"
     assert wrapper.calls == [(7, "42")]
-    assert metadata == {"kanboard_agent.codex-node1.thread_id": "thread-123"}
-    assert saved == {"42": {"kanboard_agent.codex-node1.thread_id": "thread-123"}}
+    assert metadata == {"kanboard_worker.codex-node1.thread_id": "thread-123"}
+    assert saved == {"42": {"kanboard_worker.codex-node1.thread_id": "thread-123"}}
 
 
 def _config(tmp_path: Path) -> AppConfig:

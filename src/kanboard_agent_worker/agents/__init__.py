@@ -18,13 +18,10 @@ __all__ = [
 ]
 
 
-def create_agent_wrapper(
-    config: AgentConfig,
-    thread_id: str | None = None,
-) -> AgentWrapper:
+def create_agent_wrapper(config: AgentConfig) -> AgentWrapper:
     name = config.name.lower()
     if name == "codex":
-        return CodexAgentWrapper(config, thread_id=thread_id)
+        return CodexAgentWrapper(config)
     if name == "claude":
-        return ClaudeAgentWrapper(config, session_name=thread_id, session_exists=bool(thread_id))
+        return ClaudeAgentWrapper(config)
     return SubprocessAgentWrapper(config)

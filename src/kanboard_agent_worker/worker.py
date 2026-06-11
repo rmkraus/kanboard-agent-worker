@@ -120,8 +120,8 @@ class Worker:
             comments = self.client.get_all_comments(task_id)
             metadata = self.client.get_task_metadata(task_id)
             self.client.create_comment(task_id, self._ensure_user_id(), f"Starting `{self.config.agent.name}`.")
-            wrapper = self._agent_wrapper(claimed, metadata)
-            self._ensure_agent_thread_id(claimed, wrapper, metadata)
+            wrapper = self._agent_wrapper()
+            thread_id = self._ensure_agent_thread_id(claimed, wrapper, metadata)
             prompt = build_agent_prompt(
                 task,
                 comments=comments,
@@ -129,7 +129,7 @@ class Worker:
                 worker_username=self.config.server.user,
                 system_prompt=self.config.agent.system_prompt,
             )
-            result = wrapper.exec(prompt)
+            result = wrapper.exec(thread_id, prompt)
             self._save_agent_thread_id(task, result.thread_id)
             card_text = summarize_output(result.card_text())
             self.client.create_comment(task_id, self._ensure_user_id(), card_text)
@@ -200,13 +200,8 @@ class Worker:
             self.user_id = user["id"]
         return self.user_id
 
-    def _agent_wrapper(self, claimed: ClaimedTask, metadata: dict[str, str] | None = None):
-        task = claimed.task
-        key = thread_metadata_key(self.config.server.user)
-        thread_id = (metadata or {}).get(key)
-        if not thread_id:
-            thread_id = self.client.get_task_metadata_by_name(task["id"], key)
-        return create_agent_wrapper(self.config.agent, thread_id=thread_id or None)
+    def _agent_wrapper(self):
+        return create_agent_wrapper(self.config.agent)
 
     def _ensure_agent_thread_id(self, claimed: ClaimedTask, wrapper, metadata: dict[str, str]) -> str:
         task = claimed.task
@@ -249,4 +244,4 @@ class Worker:
 
 
 def thread_metadata_key(server_user: str) -> str:
-    return f"kanboard_agent.{server_user}.thread_id"
+    return f"kanboard_worker.{server_user}.thread_id"

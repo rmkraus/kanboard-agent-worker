@@ -3,15 +3,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..config import AgentConfig
 from .base import AgentExecResult, AgentExecutionError, BaseAgentWrapper
 
 
 class CodexAgentWrapper(BaseAgentWrapper):
-    def __init__(self, config: AgentConfig, thread_id: str | None = None) -> None:
-        super().__init__(config)
-        self.thread_id = thread_id
-
     def create_thread_id(self, project_id: int | str, task_id: int | str) -> str:
         command = [self._executable(), "exec", "--skip-git-repo-check", "--json", "-"]
         completed = self._run(command, input_text="hello")
@@ -21,20 +16,16 @@ class CodexAgentWrapper(BaseAgentWrapper):
             raise AgentExecutionError(f"Codex thread creation failed with exit code {completed.returncode}")
         if not thread_id:
             raise AgentExecutionError("Codex did not emit thread.started with a thread_id")
-        self.thread_id = thread_id
         return thread_id
 
-    def exec(self, prompt: str) -> AgentExecResult:
-        if self.thread_id:
-            command = [self._executable(), "exec", "resume", self.thread_id, "--skip-git-repo-check", "--json", "-"]
-        else:
-            command = [self._executable(), "exec", "--skip-git-repo-check", "--json", "-"]
+    def exec(self, thread_id: str, prompt: str) -> AgentExecResult:
+        if not thread_id:
+            raise AgentExecutionError("Codex requires a thread id")
 
+        command = [self._executable(), "exec", "resume", thread_id, "--skip-git-repo-check", "--json", "-"]
         completed = self._run(command, input_text=prompt)
         events = tuple(self._parse_jsonl_events(completed.stdout))
-        thread_id = self._thread_id_from_events(events) or self.thread_id
-        if thread_id:
-            self.thread_id = thread_id
+        emitted_thread_id = self._thread_id_from_events(events) or thread_id
 
         return AgentExecResult(
             exit_code=completed.returncode,
@@ -43,7 +34,7 @@ class CodexAgentWrapper(BaseAgentWrapper):
             stderr=completed.stderr,
             command=tuple(command),
             events=events,
-            thread_id=thread_id,
+            thread_id=emitted_thread_id,
         )
 
     def _executable(self) -> str:

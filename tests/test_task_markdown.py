@@ -20,7 +20,7 @@ def test_build_agent_prompt_contains_identity_metadata_conversation_and_system_p
     prompt = build_agent_prompt(
         {"id": "7", "title": "Fix bug", "description": "## Spec\nDo the thing", "project_id": "1"},
         comments=[{"username": "alice", "date_creation": "1000", "comment": "Please fix this"}],
-        metadata={"kanboard_agent.codex-node1.thread_id": "thread-123"},
+        metadata={"kanboard_worker.codex-node1.thread_id": "thread-123"},
         worker_username="codex-node1",
         system_prompt="Prefer small changes.",
     )
@@ -28,6 +28,6 @@ def test_build_agent_prompt_contains_identity_metadata_conversation_and_system_p
     assert "# System Prompt" in prompt
     assert "Prefer small changes." in prompt
     assert "Username: codex-node1" in prompt
-    assert "kanboard_agent.codex-node1.thread_id" in prompt
+    assert "kanboard_worker.codex-node1.thread_id" in prompt
     assert "1000 alice: Please fix this" in prompt
     assert "Your final response from this turn will be posted as a Kanboard card comment" in prompt

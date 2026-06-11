@@ -37,7 +37,7 @@ class AgentWrapper(Protocol):
     def create_thread_id(self, project_id: int | str, task_id: int | str) -> str:
         ...
 
-    def exec(self, prompt: str) -> AgentExecResult:
+    def exec(self, thread_id: str, prompt: str) -> AgentExecResult:
         ...
 
 

@@ -4,7 +4,7 @@ from .base import AgentExecResult, AgentExecutionError, BaseAgentWrapper
 
 
 class SubprocessAgentWrapper(BaseAgentWrapper):
-    def exec(self, prompt: str) -> AgentExecResult:
+    def exec(self, thread_id: str, prompt: str) -> AgentExecResult:
         if not self.config.command:
             raise AgentExecutionError("agent.command is required for generic subprocess agents")
         command = list(self.config.command)
