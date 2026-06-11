@@ -38,6 +38,7 @@ def test_worker_saves_changed_agent_session_id(tmp_path: Path) -> None:
             ClaimedTask(
                 board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
                 task={"id": "42"},
+                todo_column_id=1,
                 done_column_id=3,
                 blocked_column_id=4,
             ),
@@ -61,6 +62,7 @@ def test_worker_returns_empty_session_id_when_metadata_is_missing(tmp_path: Path
     claimed = ClaimedTask(
         board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
         task={"id": "42"},
+        todo_column_id=1,
         done_column_id=3,
         blocked_column_id=4,
     )
@@ -315,6 +317,7 @@ def test_worker_iter_claimed_work_yields_until_no_work(tmp_path: Path) -> None:
     claim = ClaimedTask(
         board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
         task={"id": "42"},
+        todo_column_id=1,
         done_column_id=3,
         blocked_column_id=4,
     )
@@ -368,6 +371,7 @@ def test_worker_respects_card_move_done_by_agent_tool(tmp_path: Path) -> None:
     claimed = ClaimedTask(
         board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
         task={"id": "42", "column_id": 2, "description": "## Spec\nDo it"},
+        todo_column_id=1,
         done_column_id=3,
         blocked_column_id=4,
     )
@@ -407,6 +411,7 @@ def test_worker_truncates_agent_text_inline(tmp_path: Path) -> None:
     claimed = ClaimedTask(
         board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
         task={"id": "42", "description": "## Spec\nDo it"},
+        todo_column_id=1,
         done_column_id=3,
         blocked_column_id=4,
     )
@@ -417,7 +422,7 @@ def test_worker_truncates_agent_text_inline(tmp_path: Path) -> None:
     assert moves == [3]
 
 
-def test_worker_does_not_complete_parent_when_agent_tool_created_pending_subtasks(tmp_path: Path) -> None:
+def test_worker_returns_parent_to_ready_when_agent_tool_created_pending_subtasks(tmp_path: Path) -> None:
     comments = []
     moves = []
     key = session_metadata_key("codex-node1")
@@ -454,7 +459,7 @@ def test_worker_does_not_complete_parent_when_agent_tool_created_pending_subtask
     asyncio.run(worker.execute_claimed(claimed))
 
     assert comments == ["Split this into follow-up work and created a subtask."]
-    assert moves == []
+    assert moves == [1]
 
 
 def test_worker_completes_subtask_and_comments_on_parent(tmp_path: Path) -> None:
@@ -495,6 +500,7 @@ def test_worker_completes_subtask_and_comments_on_parent(tmp_path: Path) -> None
         board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
         task={"id": "42", "description": "## Spec\nParent"},
         subtask={"id": "99", "task_id": "42", "title": "Subtask work", "user_id": 9, "status": 1},
+        todo_column_id=1,
         done_column_id=3,
         blocked_column_id=4,
     )

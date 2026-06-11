@@ -22,7 +22,7 @@ Use list_attachments to inspect task files, get_attachment to download a task fi
 Use add_subtask for follow-up work that should be handled separately. Assign subtasks to exact roster usernames when a clear owner exists, including yourself when appropriate.
 Use move_column only for intentional workflow routing between configured columns.
 Column policy:
-- todo: return the card to the queue only when explicitly asked to requeue it or when no active work should continue right now. Do not move to todo just because you created subtasks.
+- todo: return the card to the queue only when explicitly asked to requeue it or when no active work should continue right now. Do not move to todo just because you created subtasks; the worker returns parent cards with pending subtasks to todo after your turn.
 - working: the worker normally puts claimed cards here. Move to working only when correcting a card that is in the wrong column while active work continues.
 - blocked: move here when progress requires a human decision, missing credentials, unavailable dependency, reproducible failure outside your control, or another blocker you cannot resolve in this turn.
 - done: move here only when the card's requested work is complete and there are no pending subtasks. For ordinary successful top-level task completion, you may leave the card in place; the worker will move it to done automatically.

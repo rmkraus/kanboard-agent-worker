@@ -175,7 +175,7 @@ Agents can create one or more subtasks by calling the Kanboard `add_subtask`
 tool. The optional `assignee` argument should match a Kanboard username, usually
 one of the configured roster entries. When a whole-card agent creates pending
 subtasks, the worker sees those subtasks before auto-completing the parent and
-leaves the parent card in its current column.
+returns the parent card to the configured todo/ready column.
 
 ## Worker Lifecycle
 
@@ -197,7 +197,8 @@ leaves the parent card in its current column.
     column moves.
 11. Post the final response to Kanboard comments.
 12. Move successful whole-task work to done unless the agent already moved the
-    card or the card has pending subtasks. Failed responses are blocked.
+    card. If the card has pending subtasks, return it to the todo/ready column.
+    Failed responses are blocked.
 
 ## API Notes
 

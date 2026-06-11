@@ -31,9 +31,9 @@ class ClaimedTask:
 
     board: BoardConfig
     task: dict[str, Any]
+    todo_column_id: int | str
     done_column_id: int | str
     blocked_column_id: int | str
-    todo_column_id: int | str | None = None
     subtask: dict[str, Any] | None = None
 
 
@@ -275,13 +275,17 @@ class Worker:
                 await self._route_subtask_result(claimed, response)
                 return
 
+            # route tasks to next step
             if response.stop_reason != "end_turn":
+                # there was an error processing the task, move to blocked
                 await self._block_task(
                     claimed, f"Agent stopped with reason {response.stop_reason}."
                 )
             elif await self._agent_moved_task(claimed):
+                # agent has already moved its own card, leave it alone
                 return
             elif await self._task_has_pending_subtasks(task):
+                await self._move_task_to_column(claimed, claimed.todo_column_id)
                 return
             else:
                 await self._move_task_to_column(claimed, claimed.done_column_id)
