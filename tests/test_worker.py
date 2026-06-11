@@ -343,7 +343,6 @@ def test_worker_respects_card_move_done_by_agent_tool(tmp_path: Path) -> None:
     key = session_metadata_key("codex-node1")
     comments = []
     moves = []
-    descriptions = []
 
     class FakeClient:
         async def get_all_comments(self, task_id):
@@ -357,9 +356,6 @@ def test_worker_respects_card_move_done_by_agent_tool(tmp_path: Path) -> None:
 
         async def save_task_metadata(self, task_id, values):
             raise AssertionError("existing session id should not be saved again")
-
-        async def update_task_description(self, task_id, description):
-            descriptions.append(description)
 
         async def move_task_to_column(self, project_id, task_id, column_id, swimlane_id=0):
             moves.append(column_id)
@@ -371,7 +367,7 @@ def test_worker_respects_card_move_done_by_agent_tool(tmp_path: Path) -> None:
     _install_fake_acp_session(worker, text="Need a human answer before I can continue.")
     claimed = ClaimedTask(
         board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
-        task={"id": "42", "column_id": 2, "description": "## Spec\nDo it\n\n## Output\nold"},
+        task={"id": "42", "column_id": 2, "description": "## Spec\nDo it"},
         done_column_id=3,
         blocked_column_id=4,
     )
@@ -379,13 +375,11 @@ def test_worker_respects_card_move_done_by_agent_tool(tmp_path: Path) -> None:
     asyncio.run(worker.execute_claimed(claimed))
 
     assert comments == ["Need a human answer before I can continue."]
-    assert descriptions[-1].strip().endswith("Need a human answer before I can continue.")
     assert moves == []
 
 
 def test_worker_truncates_agent_text_inline(tmp_path: Path) -> None:
     comments = []
-    descriptions = []
     moves = []
     key = session_metadata_key("codex-node1")
 
@@ -401,9 +395,6 @@ def test_worker_truncates_agent_text_inline(tmp_path: Path) -> None:
 
         async def save_task_metadata(self, task_id, values):
             raise AssertionError("existing session id should not be saved again")
-
-        async def update_task_description(self, task_id, description):
-            descriptions.append(description)
 
         async def get_all_subtasks(self, task_id):
             return []
@@ -415,7 +406,7 @@ def test_worker_truncates_agent_text_inline(tmp_path: Path) -> None:
     _install_fake_acp_session(worker, text="x" * 6005)
     claimed = ClaimedTask(
         board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
-        task={"id": "42", "description": "## Spec\nDo it\n\n## Output\nold"},
+        task={"id": "42", "description": "## Spec\nDo it"},
         done_column_id=3,
         blocked_column_id=4,
     )
@@ -423,13 +414,11 @@ def test_worker_truncates_agent_text_inline(tmp_path: Path) -> None:
     asyncio.run(worker.execute_claimed(claimed))
 
     assert comments == ["x" * 6000]
-    assert descriptions[-1].strip().endswith("x" * 6000)
     assert moves == [3]
 
 
 def test_worker_does_not_complete_parent_when_agent_tool_created_pending_subtasks(tmp_path: Path) -> None:
     comments = []
-    descriptions = []
     moves = []
     key = session_metadata_key("codex-node1")
 
@@ -446,9 +435,6 @@ def test_worker_does_not_complete_parent_when_agent_tool_created_pending_subtask
         async def save_task_metadata(self, task_id, values):
             raise AssertionError("existing session id should not be saved again")
 
-        async def update_task_description(self, task_id, description):
-            descriptions.append(description)
-
         async def move_task_to_column(self, project_id, task_id, column_id, swimlane_id=0):
             moves.append(column_id)
 
@@ -459,7 +445,7 @@ def test_worker_does_not_complete_parent_when_agent_tool_created_pending_subtask
     _install_fake_acp_session(worker, text="Split this into follow-up work and created a subtask.")
     claimed = ClaimedTask(
         board=BoardConfig(id=7, todo="Ready", working="In Progress", blocked="Blocked", done="Done"),
-        task={"id": "42", "description": "## Spec\nDo it\n\n## Output\nold"},
+        task={"id": "42", "description": "## Spec\nDo it"},
         todo_column_id=1,
         done_column_id=3,
         blocked_column_id=4,
@@ -468,7 +454,6 @@ def test_worker_does_not_complete_parent_when_agent_tool_created_pending_subtask
     asyncio.run(worker.execute_claimed(claimed))
 
     assert comments == ["Split this into follow-up work and created a subtask."]
-    assert descriptions[-1].strip().endswith("Split this into follow-up work and created a subtask.")
     assert moves == []
 
 

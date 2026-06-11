@@ -105,7 +105,8 @@ worker username, card fields, task metadata, the visible Kanboard comment
 conversation, the configured `roster`, the task description, and
 `agent.system_prompt`. The template
 tells the agent that its final response will be posted as a Kanboard card
-comment and copied into `## Output`. Successful whole-card work moves to the
+comment. Larger artifacts should be written to files and attached to the card
+with the Kanboard attachment tools. Successful whole-card work moves to the
 configured done column by default. Agents should call the Kanboard `move_column`
 tool when a card should be blocked or moved somewhere other than the default
 successful completion path.
@@ -148,9 +149,6 @@ Natural language instructions for the agent.
 agent: codex
 max_tokens: 4000
 context: optional paths or context
-
-## Output
-The worker replaces this section with the final summary.
 ```
 
 If `## Spec` is missing, the worker sends the whole description to the agent.
@@ -197,16 +195,14 @@ leaves the parent card in its current column.
 9. Save the ACP session id in Kanboard task metadata.
 10. Give ACP agents Kanboard tools for attachments, subtasks, and configured
     column moves.
-11. Post the final response to Kanboard comments and update `## Output` for
-    whole-task work.
+11. Post the final response to Kanboard comments.
 12. Move successful whole-task work to done unless the agent already moved the
     card or the card has pending subtasks. Failed responses are blocked.
 
 ## API Notes
 
 The implementation uses Kanboard JSON-RPC 2.0 via POST requests, `getBoard` to
-read swimlanes/columns/tasks, `moveTaskPosition` for column moves, `updateTask`
-for description updates, `createComment` for progress comments, `getAllSubtasks`
-and `updateSubtask` for subtask lifecycle, `setSubtaskStartTime` and
+read swimlanes/columns/tasks, `moveTaskPosition` for column moves,
+`createComment` for progress comments, `getAllSubtasks` and `updateSubtask` for subtask lifecycle, `setSubtaskStartTime` and
 `setSubtaskEndTime` for timers, task file methods for attachments, and `getMe`
 to resolve the authenticated user's numeric ID for comments.

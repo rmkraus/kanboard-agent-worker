@@ -14,7 +14,7 @@ from asyncio_pool import AioPool
 from .agents import AcpSession, AcpSessionError
 from .config import AppConfig, BoardConfig
 from .kanboard import KanboardClient, KanboardError, column_lookup, get_me_sync
-from .task_markdown import build_agent_prompt, replace_output_section
+from .task_markdown import build_agent_prompt
 
 LOGGER = logging.getLogger(__name__)
 WORK_STARTED_COMMENT = "Started working on this task."
@@ -267,16 +267,13 @@ class Worker:
                 await self._save_agent_session_id(claimed, metadata, session.session_id)
                 card_text = session.agent_text().strip()[:6000]
 
+            # add comment to the task chat log
             await self.client.create_comment(task_id, self.user_id, card_text)
 
+            # if this was a subtask, close it
             if claimed.subtask:
                 await self._route_subtask_result(claimed, response)
                 return
-
-            updated = replace_output_section(
-                str(task.get("description") or ""), card_text
-            )
-            await self.client.update_task_description(task_id, updated)
 
             if response.stop_reason != "end_turn":
                 await self._block_task(

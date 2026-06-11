@@ -1,20 +1,14 @@
 from __future__ import annotations
 
 from kanboard_agent_worker.config import RosterEntry
-from kanboard_agent_worker.task_markdown import build_agent_prompt, extract_section, replace_output_section
+from kanboard_agent_worker.task_markdown import build_agent_prompt, extract_section
 
 
 def test_extract_section() -> None:
-    markdown = "## Spec\nDo this\n\n## Config\nagent: codex\n\n## Output\nold"
+    markdown = "## Spec\nDo this\n\n## Config\nagent: codex\n\n## Notes\nold"
 
     assert extract_section(markdown, "Spec") == "Do this"
     assert extract_section(markdown, "Config") == "agent: codex"
-
-
-def test_replace_output_section() -> None:
-    markdown = "## Spec\nDo this\n\n## Output\nold\n"
-
-    assert replace_output_section(markdown, "new").strip() == "## Spec\nDo this\n\n## Output\nnew"
 
 
 def test_build_agent_prompt_contains_identity_metadata_conversation_and_system_prompt() -> None:
@@ -39,7 +33,7 @@ def test_build_agent_prompt_contains_identity_metadata_conversation_and_system_p
     assert "- blocked: move here when progress requires a human decision" in prompt
     assert "- done: move here only when the card's requested work is complete" in prompt
     assert "Do not move the parent task unless the parent itself needs a workflow change." in prompt
-    assert "Your final response from this turn will be posted as a Kanboard card comment" in prompt
+    assert "Your final response from this turn will be posted as a Kanboard card comment." in prompt
 
 
 def test_build_agent_prompt_omits_missing_config_section() -> None:

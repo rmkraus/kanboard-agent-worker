@@ -14,7 +14,7 @@ SECTION_PATTERN = re.compile(r"(?m)^##\s+([A-Za-z0-9 _-]+)\s*$")
 
 DEFAULT_AGENT_SYSTEM_PROMPT = """You are a local CLI agent working from a Kanboard card.
 Do the requested work in the configured working directory.
-Your final response from this turn will be posted as a Kanboard card comment and copied into the card's Output section.
+Your final response from this turn will be posted as a Kanboard card comment.
 Make the final response concise, factual, and useful to a human reviewer.
 Include blockers or follow-up steps when relevant.
 Use the available Kanboard tools instead of inventing text commands.
@@ -118,25 +118,6 @@ def extract_section(markdown: str, section_name: str) -> str | None:
         end = matches[index + 1].start() if index + 1 < len(matches) else len(markdown)
         return markdown[start:end].strip()
     return None
-
-
-def replace_output_section(markdown: str, output: str) -> str:
-    """Replace or append the card's ``## Output`` section."""
-
-    replacement = f"## Output\n{output.strip()}\n"
-    matches = list(SECTION_PATTERN.finditer(markdown))
-
-    for index, match in enumerate(matches):
-        if match.group(1).strip().casefold() != "output":
-            continue
-        start = match.start()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(markdown)
-        prefix = markdown[:start].rstrip()
-        suffix = markdown[end:].lstrip()
-        pieces = [prefix, replacement.rstrip(), suffix]
-        return "\n\n".join(piece for piece in pieces if piece).rstrip() + "\n"
-
-    return markdown.rstrip() + "\n\n" + replacement
 
 
 def _merged_system_prompt(system_prompt: str) -> str:

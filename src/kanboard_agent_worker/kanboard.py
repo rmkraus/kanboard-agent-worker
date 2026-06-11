@@ -147,11 +147,6 @@ class KanboardClient:
             raise KanboardError(f"createComment failed for task {task_id}")
         return int(result)
 
-    async def update_task_description(self, task_id: int | str, description: str) -> None:
-        result = await self.call("updateTask", {"id": _coerce_id(task_id), "description": description})
-        if result is not True:
-            raise KanboardError(f"updateTask failed for task {task_id}")
-
     async def get_task_metadata(self, task_id: int | str) -> dict[str, str]:
         result = await self.call("getTaskMetadata", [_coerce_id(task_id)])
         if result is False or result is None:
