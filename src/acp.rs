@@ -388,13 +388,48 @@ async fn handle_client_request(
         "terminal/output" => terminal_output(params, terminals).await,
         "terminal/wait_for_exit" => terminal_wait(params, terminals).await,
         "terminal/release" | "terminal/kill" => terminal_forget(params, terminals).await,
-        "session/request_permission" => Err(AppError::Acp(
-            "session/request_permission is not supported".to_string(),
-        )),
+        "session/request_permission" => request_permission(params).await,
         other => Err(AppError::Acp(format!(
             "unsupported ACP client method {other}"
         ))),
     }
+}
+
+/// Approve a permission request from the local ACP agent.
+///
+/// The worker runs trusted, configured agents non-interactively. Selecting the
+/// regular one-shot allow option keeps the behavior narrow while unblocking
+/// agents that ask the ACP client before using tools or terminals.
+async fn request_permission(params: &Value) -> Result<Value> {
+    let options = params
+        .get("options")
+        .and_then(Value::as_array)
+        .ok_or_else(|| AppError::Acp("session/request_permission requires options".to_string()))?;
+    let selected = [
+        "allow",
+        "allow_once",
+        "default",
+        "acceptEdits",
+        "auto",
+        "allow_always",
+    ]
+    .iter()
+    .find_map(|wanted| {
+        options.iter().find_map(|option| {
+            let option_id = option.get("optionId").and_then(Value::as_str)?;
+            (option_id == *wanted).then_some(option_id)
+        })
+    })
+    .or_else(|| {
+        options.iter().find_map(|option| {
+            let kind = option.get("kind").and_then(Value::as_str).unwrap_or("");
+            let option_id = option.get("optionId").and_then(Value::as_str)?;
+            kind.starts_with("allow").then_some(option_id)
+        })
+    })
+    .ok_or_else(|| AppError::Acp("permission request had no allow option".to_string()))?;
+
+    Ok(json!({"outcome": {"outcome": "selected", "optionId": selected}}))
 }
 
 /// Read a UTF-8 text file from inside the configured agent root.
@@ -677,6 +712,25 @@ mod tests {
                 ..base
             })
             .is_err()
+        );
+    }
+
+    /// Permission prompts select the narrow one-shot allow option when available.
+    #[tokio::test]
+    async fn request_permission_prefers_one_shot_allow() {
+        let response = request_permission(&json!({
+            "options": [
+                {"kind": "allow_always", "name": "Always Allow", "optionId": "allow_always"},
+                {"kind": "allow_once", "name": "Allow", "optionId": "allow"},
+                {"kind": "reject_once", "name": "Reject", "optionId": "reject"}
+            ]
+        }))
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response,
+            json!({"outcome": {"outcome": "selected", "optionId": "allow"}})
         );
     }
 }
