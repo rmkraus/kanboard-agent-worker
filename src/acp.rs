@@ -1,24 +1,36 @@
 //! Agent Client Protocol process management.
 //!
-//! This module starts an ACP-compatible local agent, sends JSON-RPC requests to
-//! it, collects streamed agent text, and implements the small set of client
-//! callbacks the agent needs while working in the configured repository.
+//! This module starts an ACP-compatible local agent through the official Rust
+//! SDK, sends one prompt turn, collects streamed assistant text, and handles
+//! the client callbacks an agent may request while working in the configured
+//! repository.
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
-    process::Stdio,
-    sync::{
-        Arc,
-        atomic::{AtomicI64, Ordering},
-    },
+    path::{Path, PathBuf},
+    sync::Arc,
 };
 
-use serde_json::{Value, json};
+use agent_client_protocol::{
+    AcpAgent, Agent as AcpAgentRole, Client, ConnectionTo, Dispatch, on_receive_dispatch,
+    on_receive_request,
+    schema::{
+        ClientCapabilities, CloseSessionRequest, ContentBlock, ContentChunk, CreateTerminalRequest,
+        CreateTerminalResponse, EnvVariable, FileSystemCapabilities, Implementation,
+        InitializeRequest, KillTerminalRequest, KillTerminalResponse, LoadSessionRequest,
+        McpServer, McpServerStdio, NewSessionRequest, NewSessionResponse, PermissionOption,
+        PermissionOptionKind, ProtocolVersion, ReadTextFileRequest, ReadTextFileResponse,
+        ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
+        RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+        SessionNotification, SessionUpdate, StopReason, TerminalExitStatus, TerminalId,
+        TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest,
+        WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
+    },
+    util::MatchDispatch,
+};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{Child, ChildStdin, Command},
-    sync::{Mutex, Notify, oneshot},
+    process::Command,
+    sync::{Mutex, Notify},
     time::{Duration, timeout},
 };
 use uuid::Uuid;
@@ -28,8 +40,7 @@ use crate::{
     config::{AgentConfig, AppConfig, BoardConfig},
 };
 
-/// ACP protocol version spoken by this client.
-const PROTOCOL_VERSION: i64 = 1;
+type AcpResult<T> = agent_client_protocol::Result<T>;
 
 /// Result of one completed ACP prompt turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,26 +53,16 @@ pub struct AgentTurn {
     pub text: String,
 }
 
-/// Live ACP subprocess session.
+/// Live ACP subprocess session configuration.
 ///
-/// The session owns the child process, tracks pending JSON-RPC responses, and
-/// exposes a turn-based API for worker task execution.
-#[derive(Debug)]
+/// The actual subprocess and JSON-RPC connection are owned by the SDK for the
+/// duration of `run_turn`.
+#[derive(Debug, Clone)]
 pub struct AcpSession {
     /// Canonical working directory exposed to the agent.
     root: PathBuf,
     /// Command and arguments used to launch the ACP process.
     command: Vec<String>,
-    /// Shared stdin writer for outbound JSON-RPC messages and callback replies.
-    stdin: Arc<Mutex<ChildStdin>>,
-    /// Child process handle killed when the session is dropped.
-    child: Child,
-    /// In-flight JSON-RPC requests waiting for a response by id.
-    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value>>>>>,
-    /// Monotonic JSON-RPC request id source.
-    next_id: AtomicI64,
-    /// Text accumulated from `session/update` agent message chunks.
-    agent_text: Arc<Mutex<String>>,
     /// Current ACP session id, if one has already been created or loaded.
     session_id: Option<String>,
     /// Maximum duration allowed for one agent prompt turn.
@@ -71,66 +72,19 @@ pub struct AcpSession {
 }
 
 impl AcpSession {
-    /// Start an ACP subprocess and initialize the protocol session.
+    /// Prepare an ACP subprocess session.
     pub async fn create(
         config: &AgentConfig,
         app_config: &AppConfig,
         session_id: impl Into<Option<String>>,
     ) -> Result<Self> {
-        let command = command_for_config(config)?;
-        let root = PathBuf::from(&config.pwd).canonicalize()?;
-        let mut child = Command::new(&command[0])
-            .args(&command[1..])
-            .current_dir(&root)
-            .env("KANBOARD_URL", &app_config.server.url)
-            .env("KANBOARD_USER", &app_config.server.user)
-            .env("KANBOARD_TOKEN", &app_config.server.token)
-            .env("KANBOARD_WORKER_BOARDS", boards_env(&app_config.boards))
-            .env("KANBOARD_AGENT_PWD", &root)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| {
-                AppError::Acp(format!(
-                    "failed to start ACP command {:?}: {error}",
-                    command
-                ))
-            })?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| AppError::Acp("ACP agent process did not expose stdin".to_string()))?;
-        let stdin = Arc::new(Mutex::new(stdin));
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| AppError::Acp("ACP agent process did not expose stdout".to_string()))?;
-        let pending = Arc::new(Mutex::new(HashMap::new()));
-        let agent_text = Arc::new(Mutex::new(String::new()));
-        let terminals = Arc::new(Mutex::new(HashMap::new()));
-        tokio::spawn(read_loop(
-            BufReader::new(stdout),
-            stdin.clone(),
-            pending.clone(),
-            agent_text.clone(),
-            root.clone(),
-            terminals.clone(),
-        ));
-        let mut session = Self {
-            root,
-            command,
-            stdin,
-            child,
-            pending,
-            next_id: AtomicI64::new(0),
-            agent_text,
+        Ok(Self {
+            root: PathBuf::from(&config.pwd).canonicalize()?,
+            command: command_for_config(config)?,
             session_id: session_id.into(),
             timeout_seconds: config.timeout_seconds,
             app_config: app_config.clone(),
-        };
-        session.initialize().await?;
-        Ok(session)
+        })
     }
 
     /// Return the launched ACP command and arguments.
@@ -139,24 +93,15 @@ impl AcpSession {
     }
 
     /// Send one prompt to the agent and collect the resulting turn text.
-    ///
-    /// The session id is loaded or created before prompting, then closed after
-    /// the turn so a future worker run can reload it from task metadata.
     pub async fn run_turn(&mut self, prompt: &str) -> Result<AgentTurn> {
-        let session_id = self.session_id_for_turn().await?;
-        self.session_id = Some(session_id.clone());
-        // `session/load` can replay prior assistant chunks; only collect text
-        // generated by the prompt we are about to send.
-        self.agent_text.lock().await.clear();
-        let response = timeout(
+        let turn = timeout(
             Duration::from_secs(self.timeout_seconds),
-            self.request(
-                "session/prompt",
-                json!({
-                    "sessionId": session_id,
-                    "messageId": Uuid::new_v4().to_string(),
-                    "prompt": [{"type": "text", "text": prompt}],
-                }),
+            run_sdk_turn(
+                self.command.clone(),
+                self.root.clone(),
+                self.session_id.clone(),
+                prompt.to_string(),
+                self.app_config.clone(),
             ),
         )
         .await
@@ -166,104 +111,8 @@ impl AcpSession {
                 self.timeout_seconds
             ))
         })??;
-        let _ = self
-            .request("session/close", json!({"sessionId": session_id}))
-            .await;
-        Ok(AgentTurn {
-            stop_reason: response
-                .get("stopReason")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_string(),
-            session_id: self.session_id.clone().unwrap_or_default(),
-            text: self
-                .agent_text
-                .lock()
-                .await
-                .trim()
-                .chars()
-                .take(6000)
-                .collect(),
-        })
-    }
-
-    /// Negotiate ACP capabilities with the child process.
-    async fn initialize(&mut self) -> Result<()> {
-        self.request(
-            "initialize",
-            json!({
-                "protocolVersion": PROTOCOL_VERSION,
-                "clientCapabilities": {
-                    "fs": {"readTextFile": true, "writeTextFile": true},
-                    "terminal": true
-                },
-                "clientInfo": {"name": "kanboard-agent-worker", "version": env!("CARGO_PKG_VERSION")}
-            }),
-        )
-        .await
-        .map(|_| ())
-    }
-
-    /// Load an existing ACP session or create a new one for the next turn.
-    async fn session_id_for_turn(&mut self) -> Result<String> {
-        let mcp_servers = json!([self.kanboard_mcp_server()]);
-        if let Some(session_id) = &self.session_id {
-            self.request(
-                "session/load",
-                json!({"cwd": self.root, "sessionId": session_id, "mcpServers": mcp_servers}),
-            )
-            .await?;
-            return Ok(session_id.clone());
-        }
-        let response = self
-            .request(
-                "session/new",
-                json!({"cwd": self.root, "mcpServers": mcp_servers}),
-            )
-            .await?;
-        response
-            .get("sessionId")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .ok_or_else(|| AppError::Acp(format!("session/new returned no sessionId: {response}")))
-    }
-
-    /// Build the MCP server descriptor passed to `session/new` or `session/load`.
-    fn kanboard_mcp_server(&self) -> Value {
-        json!({
-            "name": "kanboard",
-            "command": std::env::current_exe()
-                .unwrap_or_else(|_| PathBuf::from("kanboard-agent-worker")),
-            "args": ["mcp"],
-            "env": [
-                {"name": "KANBOARD_WORKER_BOARDS", "value": boards_env(&self.app_config.boards)},
-                {"name": "KANBOARD_AGENT_PWD", "value": self.root},
-            ]
-        })
-    }
-
-    /// Send a JSON-RPC request to the child process and await the matching response.
-    async fn request(&self, method: &str, params: Value) -> Result<Value> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let (sender, receiver) = oneshot::channel();
-        self.pending.lock().await.insert(id, sender);
-        let payload = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        let mut stdin = self.stdin.lock().await;
-        stdin
-            .write_all(serde_json::to_string(&payload)?.as_bytes())
-            .await?;
-        stdin.write_all(b"\n").await?;
-        stdin.flush().await?;
-        receiver
-            .await
-            .map_err(|_| AppError::Acp(format!("ACP response channel closed for {method}")))?
-    }
-}
-
-impl Drop for AcpSession {
-    /// Terminate the ACP subprocess when the session owner is dropped.
-    fn drop(&mut self) {
-        let _ = self.child.start_kill();
+        self.session_id = Some(turn.session_id.clone());
+        Ok(turn)
     }
 }
 
@@ -289,124 +138,259 @@ pub fn boards_env(boards: &[BoardConfig]) -> String {
     serde_json::to_string(boards).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// Read JSON-RPC messages from the ACP process until stdout closes.
-///
-/// Responses complete pending requests. Server-to-client requests are handled
-/// locally, and streamed agent text is appended for the eventual worker comment.
-async fn read_loop(
-    mut stdout: BufReader<tokio::process::ChildStdout>,
-    stdin: Arc<Mutex<ChildStdin>>,
-    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value>>>>>,
-    agent_text: Arc<Mutex<String>>,
+/// Run one ACP turn using the official SDK connection and session APIs.
+async fn run_sdk_turn(
+    command: Vec<String>,
     root: PathBuf,
-    terminals: Arc<Mutex<HashMap<String, TerminalState>>>,
-) {
-    let mut line = String::new();
+    session_id: Option<String>,
+    prompt: String,
+    app_config: AppConfig,
+) -> Result<AgentTurn> {
+    let client_state = ClientState::new(root.clone());
+    let agent = agent_for_config(&command, &root, &app_config)?;
+    let mcp_servers = mcp_servers(&root, &app_config.boards)?;
+    Client
+        .builder()
+        .name("kanboard-agent-worker")
+        .on_receive_request(
+            {
+                let state = client_state.clone();
+                async move |request: ReadTextFileRequest, responder, _| {
+                    responder.respond(read_text_file(request, &state.root).await?)
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let state = client_state.clone();
+                async move |request: WriteTextFileRequest, responder, _| {
+                    responder.respond(write_text_file(request, &state.root).await?)
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let state = client_state.clone();
+                async move |request: CreateTerminalRequest, responder, _| {
+                    responder.respond(create_terminal(request, &state).await?)
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let state = client_state.clone();
+                async move |request: TerminalOutputRequest, responder, _| {
+                    responder.respond(terminal_output(request, &state).await?)
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let state = client_state.clone();
+                async move |request: WaitForTerminalExitRequest, responder, _| {
+                    responder.respond(terminal_wait(request, &state).await?)
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let state = client_state.clone();
+                async move |request: ReleaseTerminalRequest, responder, _| {
+                    responder.respond(terminal_release(request.terminal_id, &state).await?)
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let state = client_state.clone();
+                async move |request: KillTerminalRequest, responder, _| {
+                    responder.respond(terminal_kill(request.terminal_id, &state).await?)
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: RequestPermissionRequest, responder, _| {
+                responder.respond(request_permission(&request.options)?)
+            },
+            on_receive_request!(),
+        )
+        .on_receive_dispatch(
+            async move |message: Dispatch, cx: ConnectionTo<AcpAgentRole>| {
+                message.respond_with_error(
+                    agent_client_protocol::util::internal_error("unhandled ACP client message"),
+                    cx,
+                )
+            },
+            on_receive_dispatch!(),
+        )
+        .connect_with(agent, async move |cx| {
+            initialize(&cx).await?;
+            let response = start_or_load_session(&cx, &root, session_id, mcp_servers).await?;
+            let session_id = response.session_id.clone();
+            let mut session = cx.attach_session(response, Vec::new())?;
+            session.send_prompt(prompt)?;
+            let (stop_reason, text) = read_agent_turn(&mut session).await?;
+            let _ = cx
+                .send_request(CloseSessionRequest::new(session_id.clone()))
+                .block_task()
+                .await;
+            Ok(AgentTurn {
+                stop_reason: stop_reason_to_str(&stop_reason).to_string(),
+                session_id: session_id.to_string(),
+                text: text.trim().chars().take(6000).collect(),
+            })
+        })
+        .await
+        .map_err(|error| AppError::Acp(error.to_string()))
+}
+
+/// Build an SDK process wrapper for the configured ACP executable.
+fn agent_for_config(command: &[String], root: &Path, app_config: &AppConfig) -> Result<AcpAgent> {
+    let (program, args) = command
+        .split_first()
+        .ok_or_else(|| AppError::Acp("agent command cannot be empty".to_string()))?;
+    Ok(AcpAgent::new(McpServer::Stdio(
+        McpServerStdio::new("agent", program)
+            .args(args.to_vec())
+            .env(vec![
+                EnvVariable::new("KANBOARD_URL", app_config.server.url.clone()),
+                EnvVariable::new("KANBOARD_USER", app_config.server.user.clone()),
+                EnvVariable::new("KANBOARD_TOKEN", app_config.server.token.clone()),
+                EnvVariable::new("KANBOARD_WORKER_BOARDS", boards_env(&app_config.boards)),
+                EnvVariable::new("KANBOARD_AGENT_PWD", root.to_string_lossy().to_string()),
+            ]),
+    )))
+}
+
+/// Advertise client capabilities to the agent.
+async fn initialize(cx: &ConnectionTo<AcpAgentRole>) -> AcpResult<()> {
+    cx.send_request(
+        InitializeRequest::new(ProtocolVersion::LATEST)
+            .client_capabilities(
+                ClientCapabilities::new()
+                    .fs(FileSystemCapabilities::new()
+                        .read_text_file(true)
+                        .write_text_file(true))
+                    .terminal(true),
+            )
+            .client_info(Implementation::new(
+                "kanboard-agent-worker",
+                env!("CARGO_PKG_VERSION"),
+            )),
+    )
+    .block_task()
+    .await
+    .map(|_| ())
+}
+
+/// Create a new ACP session or attach to a previously saved one.
+async fn start_or_load_session(
+    cx: &ConnectionTo<AcpAgentRole>,
+    root: &Path,
+    session_id: Option<String>,
+    mcp_servers: Vec<McpServer>,
+) -> AcpResult<NewSessionResponse> {
+    if let Some(session_id) = session_id {
+        let response = cx
+            .send_request(
+                LoadSessionRequest::new(session_id.clone(), root).mcp_servers(mcp_servers),
+            )
+            .block_task()
+            .await?;
+        return Ok(NewSessionResponse::new(session_id)
+            .modes(response.modes)
+            .meta(response.meta));
+    }
+    cx.send_request(NewSessionRequest::new(root).mcp_servers(mcp_servers))
+        .block_task()
+        .await
+}
+
+/// Build the Kanboard MCP server descriptor for `session/new` or `session/load`.
+fn mcp_servers(root: &Path, boards: &[BoardConfig]) -> Result<Vec<McpServer>> {
+    Ok(vec![McpServer::Stdio(
+        McpServerStdio::new(
+            "kanboard",
+            std::env::current_exe().unwrap_or_else(|_| PathBuf::from("kanboard-agent-worker")),
+        )
+        .args(vec!["mcp".to_string()])
+        .env(vec![
+            EnvVariable::new("KANBOARD_WORKER_BOARDS", boards_env(boards)),
+            EnvVariable::new("KANBOARD_AGENT_PWD", root.to_string_lossy().to_string()),
+        ]),
+    )])
+}
+
+/// Read streamed assistant text until the turn stop reason arrives.
+async fn read_agent_turn(
+    session: &mut agent_client_protocol::ActiveSession<'_, AcpAgentRole>,
+) -> AcpResult<(StopReason, String)> {
+    let mut text = String::new();
     loop {
-        line.clear();
-        match stdout.read_line(&mut line).await {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {
-                let Ok(message) = serde_json::from_str::<Value>(line.trim()) else {
-                    continue;
-                };
-                if let Some(id) = message.get("id").and_then(Value::as_i64) {
-                    if message.get("method").is_some() {
-                        respond_to_client_request(&message, id, &root, &stdin, &terminals).await;
-                        continue;
-                    }
-                    if let Some(sender) = pending.lock().await.remove(&id) {
-                        let result = if let Some(error) = message.get("error") {
-                            Err(AppError::Acp(format!("ACP JSON-RPC error: {error}")))
-                        } else {
-                            Ok(message.get("result").cloned().unwrap_or(Value::Null))
-                        };
-                        let _ = sender.send(result);
-                    }
-                    continue;
-                }
-                if message.get("method").and_then(Value::as_str) == Some("session/update") {
-                    append_agent_text(&message, &agent_text).await;
-                }
+        match session.read_update().await? {
+            agent_client_protocol::SessionMessage::SessionMessage(dispatch) => {
+                MatchDispatch::new(dispatch)
+                    .if_notification(async |notification: SessionNotification| {
+                        if let SessionUpdate::AgentMessageChunk(ContentChunk {
+                            content: ContentBlock::Text(chunk),
+                            ..
+                        }) = notification.update
+                        {
+                            text.push_str(&chunk.text);
+                        }
+                        Ok(())
+                    })
+                    .await
+                    .otherwise_ignore()?;
             }
+            agent_client_protocol::SessionMessage::StopReason(stop_reason) => {
+                return Ok((stop_reason, text));
+            }
+            _ => {}
         }
     }
 }
 
-/// Append an agent message chunk from a `session/update` notification.
-async fn append_agent_text(message: &Value, agent_text: &Arc<Mutex<String>>) {
-    let update = message
-        .get("params")
-        .and_then(|params| params.get("update"))
-        .unwrap_or(message);
-    if update.get("sessionUpdate").and_then(Value::as_str) != Some("agent_message_chunk") {
-        return;
-    }
-    let text = update
-        .get("content")
-        .and_then(|content| content.get("text"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    agent_text.lock().await.push_str(text);
-}
-
-/// Execute a JSON-RPC request initiated by the ACP process and write the reply.
-async fn respond_to_client_request(
-    message: &Value,
-    id: i64,
-    root: &PathBuf,
-    stdin: &Arc<Mutex<ChildStdin>>,
-    terminals: &Arc<Mutex<HashMap<String, TerminalState>>>,
-) {
-    let method = message.get("method").and_then(Value::as_str).unwrap_or("");
-    let params = message.get("params").cloned().unwrap_or(Value::Null);
-    let response = match handle_client_request(method, &params, root, terminals).await {
-        Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
-        Err(error) => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": {"code": -32603, "message": error.to_string()}
-        }),
-    };
-    if let Ok(encoded) = serde_json::to_string(&response) {
-        let mut stdin = stdin.lock().await;
-        let _ = stdin.write_all(encoded.as_bytes()).await;
-        let _ = stdin.write_all(b"\n").await;
-        let _ = stdin.flush().await;
+/// Convert ACP stop reasons to the existing worker string contract.
+fn stop_reason_to_str(stop_reason: &StopReason) -> &'static str {
+    match stop_reason {
+        StopReason::EndTurn => "end_turn",
+        StopReason::MaxTokens => "max_tokens",
+        StopReason::MaxTurnRequests => "max_turn_requests",
+        StopReason::Refusal => "refusal",
+        StopReason::Cancelled => "cancelled",
+        _ => "unknown",
     }
 }
 
-/// Dispatch ACP client callback methods to their local handlers.
-async fn handle_client_request(
-    method: &str,
-    params: &Value,
-    root: &PathBuf,
-    terminals: &Arc<Mutex<HashMap<String, TerminalState>>>,
-) -> Result<Value> {
-    match method {
-        "fs/read_text_file" => read_text_file(params, root).await,
-        "fs/write_text_file" => write_text_file(params, root).await,
-        "terminal/create" => create_terminal(params, root, terminals).await,
-        "terminal/output" => terminal_output(params, terminals).await,
-        "terminal/wait_for_exit" => terminal_wait(params, terminals).await,
-        "terminal/release" | "terminal/kill" => terminal_forget(params, terminals).await,
-        "session/request_permission" => request_permission(params).await,
-        other => Err(AppError::Acp(format!(
-            "unsupported ACP client method {other}"
-        ))),
+/// Shared state for ACP client callbacks.
+#[derive(Debug, Clone)]
+struct ClientState {
+    /// Canonical root that bounds file and terminal cwd callbacks.
+    root: PathBuf,
+    /// Terminal command state by ACP terminal id.
+    terminals: Arc<Mutex<HashMap<String, TerminalState>>>,
+}
+
+impl ClientState {
+    /// Build callback state for a session root.
+    fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            terminals: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 }
 
 /// Approve a permission request from the local ACP agent.
-///
-/// The worker runs trusted, configured agents non-interactively. Selecting the
-/// regular one-shot allow option keeps the behavior narrow while unblocking
-/// agents that ask the ACP client before using tools or terminals.
-async fn request_permission(params: &Value) -> Result<Value> {
-    let options = params
-        .get("options")
-        .and_then(Value::as_array)
-        .ok_or_else(|| AppError::Acp("session/request_permission requires options".to_string()))?;
+fn request_permission(options: &[PermissionOption]) -> AcpResult<RequestPermissionResponse> {
     let selected = [
         "allow",
         "allow_once",
@@ -417,106 +401,92 @@ async fn request_permission(params: &Value) -> Result<Value> {
     ]
     .iter()
     .find_map(|wanted| {
-        options.iter().find_map(|option| {
-            let option_id = option.get("optionId").and_then(Value::as_str)?;
-            (option_id == *wanted).then_some(option_id)
-        })
+        options
+            .iter()
+            .find(|option| option.option_id.to_string() == *wanted)
+            .map(|option| option.option_id.clone())
     })
     .or_else(|| {
-        options.iter().find_map(|option| {
-            let kind = option.get("kind").and_then(Value::as_str).unwrap_or("");
-            let option_id = option.get("optionId").and_then(Value::as_str)?;
-            kind.starts_with("allow").then_some(option_id)
-        })
+        options
+            .iter()
+            .find(|option| {
+                matches!(
+                    option.kind,
+                    PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways
+                )
+            })
+            .map(|option| option.option_id.clone())
     })
-    .ok_or_else(|| AppError::Acp("permission request had no allow option".to_string()))?;
+    .ok_or_else(|| {
+        agent_client_protocol::util::internal_error("permission request had no allow option")
+    })?;
 
-    Ok(json!({"outcome": {"outcome": "selected", "optionId": selected}}))
+    Ok(RequestPermissionResponse::new(
+        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(selected)),
+    ))
 }
 
 /// Read a UTF-8 text file from inside the configured agent root.
-async fn read_text_file(params: &Value, root: &PathBuf) -> Result<Value> {
-    let path = confined_path(
-        root,
-        params.get("path").and_then(Value::as_str).unwrap_or("."),
-    )?;
-    let mut text = tokio::fs::read_to_string(path).await?;
-    if let Some(line) = params.get("line").and_then(Value::as_u64) {
-        text = text
-            .lines()
+async fn read_text_file(
+    request: ReadTextFileRequest,
+    root: &Path,
+) -> AcpResult<ReadTextFileResponse> {
+    let path = confined_path(root, &request.path)?;
+    let mut lines = tokio::fs::read_to_string(path)
+        .await
+        .map_err(agent_client_protocol::Error::into_internal_error)?
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if let Some(line) = request.line {
+        lines = lines
+            .into_iter()
             .skip(line.saturating_sub(1) as usize)
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect();
     }
-    if let Some(limit) = params.get("limit").and_then(Value::as_u64) {
-        text = text.chars().take(limit as usize).collect();
+    if let Some(limit) = request.limit {
+        lines.truncate(limit as usize);
     }
-    Ok(json!({"content": text}))
+    Ok(ReadTextFileResponse::new(lines.join("\n")))
 }
 
 /// Write a UTF-8 text file inside the configured agent root.
-async fn write_text_file(params: &Value, root: &PathBuf) -> Result<Value> {
-    let path = confined_path(
-        root,
-        params.get("path").and_then(Value::as_str).unwrap_or("."),
-    )?;
+async fn write_text_file(
+    request: WriteTextFileRequest,
+    root: &Path,
+) -> AcpResult<WriteTextFileResponse> {
+    let path = confined_path(root, &request.path)?;
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(agent_client_protocol::Error::into_internal_error)?;
     }
-    tokio::fs::write(
-        path,
-        params.get("content").and_then(Value::as_str).unwrap_or(""),
-    )
-    .await?;
-    Ok(json!({}))
+    tokio::fs::write(path, request.content)
+        .await
+        .map_err(agent_client_protocol::Error::into_internal_error)?;
+    Ok(WriteTextFileResponse::new())
 }
 
 /// Start a terminal command requested by the ACP process.
-///
-/// Commands are executed asynchronously and their combined output is stored
-/// until the agent polls or waits for the terminal id.
 async fn create_terminal(
-    params: &Value,
-    root: &PathBuf,
-    terminals: &Arc<Mutex<HashMap<String, TerminalState>>>,
-) -> Result<Value> {
-    let command = params
-        .get("command")
-        .and_then(Value::as_str)
-        .ok_or_else(|| AppError::Acp("terminal/create requires command".to_string()))?;
-    let args = params
-        .get("args")
-        .and_then(Value::as_array)
-        .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
-        .unwrap_or_default();
-    let cwd = confined_path(
-        root,
-        params.get("cwd").and_then(Value::as_str).unwrap_or("."),
-    )?;
-    let output_byte_limit = params
-        .get("outputByteLimit")
-        .and_then(Value::as_u64)
-        .map(|value| value as usize);
+    request: CreateTerminalRequest,
+    state: &ClientState,
+) -> AcpResult<CreateTerminalResponse> {
+    let cwd = match request.cwd {
+        Some(path) => confined_path(&state.root, &path)?,
+        None => state.root.clone(),
+    };
     let terminal_id = Uuid::new_v4().to_string();
-    let state = TerminalState::new(output_byte_limit);
-    let state_for_task = state.clone();
-    let mut process = Command::new(command);
-    process.args(args).current_dir(cwd);
-    if let Some(env) = params.get("env").and_then(Value::as_array) {
-        for item in env {
-            if let (Some(name), Some(value)) = (
-                item.get("name").and_then(Value::as_str),
-                item.get("value").and_then(Value::as_str),
-            ) {
-                process.env(name, value);
-            }
-        }
+    let terminal = TerminalState::new(request.output_byte_limit.map(|limit| limit as usize));
+    let terminal_for_task = terminal.clone();
+    let mut process = Command::new(&request.command);
+    process.args(request.args).current_dir(cwd);
+    for env in request.env {
+        process.env(env.name, env.value);
     }
-    let child = process.output();
     tokio::spawn(async move {
-        let result = child.await.map(TerminalResult::from_output);
-        let mut slot = state_for_task.result.lock().await;
-        *slot = Some(match result {
+        let result = process.output().await.map(TerminalResult::from_output);
+        *terminal_for_task.result.lock().await = Some(match result {
             Ok(result) => result,
             Err(error) => TerminalResult {
                 output: error.to_string(),
@@ -524,82 +494,98 @@ async fn create_terminal(
                 signal: None,
             },
         });
-        state_for_task.notify.notify_waiters();
+        terminal_for_task.notify.notify_waiters();
     });
-    terminals.lock().await.insert(terminal_id.clone(), state);
-    Ok(json!({"terminalId": terminal_id}))
+    state
+        .terminals
+        .lock()
+        .await
+        .insert(terminal_id.clone(), terminal);
+    Ok(CreateTerminalResponse::new(terminal_id))
 }
 
 /// Return terminal output and exit status if the command has completed.
 async fn terminal_output(
-    params: &Value,
-    terminals: &Arc<Mutex<HashMap<String, TerminalState>>>,
-) -> Result<Value> {
-    let terminal_id = terminal_id(params)?;
-    let Some(state) = terminals.lock().await.get(&terminal_id).cloned() else {
-        return Err(AppError::Acp(format!("unknown terminal id {terminal_id}")));
-    };
-    let result = state.result.lock().await.clone();
+    request: TerminalOutputRequest,
+    state: &ClientState,
+) -> AcpResult<TerminalOutputResponse> {
+    let terminal = terminal_state(&request.terminal_id, state).await?;
+    let result = terminal.result.lock().await.clone();
     Ok(match result {
         Some(result) => {
-            let (output, truncated) = state.limit_output(&result.output);
-            json!({"output": output, "truncated": truncated, "exitStatus": result.exit_status()})
+            let (output, truncated) = terminal.limit_output(&result.output);
+            TerminalOutputResponse::new(output, truncated).exit_status(result.exit_status())
         }
-        None => json!({"output": "", "truncated": false, "exitStatus": Value::Null}),
+        None => TerminalOutputResponse::new("", false),
     })
 }
 
 /// Wait for a terminal command to finish and return its exit status.
 async fn terminal_wait(
-    params: &Value,
-    terminals: &Arc<Mutex<HashMap<String, TerminalState>>>,
-) -> Result<Value> {
-    let terminal_id = terminal_id(params)?;
-    let Some(state) = terminals.lock().await.get(&terminal_id).cloned() else {
-        return Err(AppError::Acp(format!("unknown terminal id {terminal_id}")));
-    };
+    request: WaitForTerminalExitRequest,
+    state: &ClientState,
+) -> AcpResult<WaitForTerminalExitResponse> {
+    let terminal = terminal_state(&request.terminal_id, state).await?;
     loop {
-        if let Some(result) = state.result.lock().await.clone() {
-            return Ok(result.wait_response());
+        if let Some(result) = terminal.result.lock().await.clone() {
+            return Ok(WaitForTerminalExitResponse::new(result.exit_status()));
         }
-        state.notify.notified().await;
+        terminal.notify.notified().await;
     }
 }
 
-/// Drop stored terminal state for a released or killed terminal id.
-async fn terminal_forget(
-    params: &Value,
-    terminals: &Arc<Mutex<HashMap<String, TerminalState>>>,
-) -> Result<Value> {
-    let terminal_id = terminal_id(params)?;
-    terminals.lock().await.remove(&terminal_id);
-    Ok(json!({}))
+/// Release terminal state.
+async fn terminal_release(
+    terminal_id: TerminalId,
+    state: &ClientState,
+) -> AcpResult<ReleaseTerminalResponse> {
+    state
+        .terminals
+        .lock()
+        .await
+        .remove(&terminal_id.to_string());
+    Ok(ReleaseTerminalResponse::new())
 }
 
-/// Extract a terminal id from ACP terminal callback parameters.
-fn terminal_id(params: &Value) -> Result<String> {
-    params
-        .get("terminalId")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| AppError::Acp("terminal id is required".to_string()))
+/// Kill terminal state.
+async fn terminal_kill(
+    terminal_id: TerminalId,
+    state: &ClientState,
+) -> AcpResult<KillTerminalResponse> {
+    state
+        .terminals
+        .lock()
+        .await
+        .remove(&terminal_id.to_string());
+    Ok(KillTerminalResponse::new())
+}
+
+/// Return tracked terminal state by id.
+async fn terminal_state(terminal_id: &TerminalId, state: &ClientState) -> AcpResult<TerminalState> {
+    state
+        .terminals
+        .lock()
+        .await
+        .get(&terminal_id.to_string())
+        .cloned()
+        .ok_or_else(|| agent_client_protocol::util::internal_error("unknown terminal id"))
 }
 
 /// Resolve a requested path and reject paths outside the configured root.
-fn confined_path(root: &PathBuf, path: &str) -> Result<PathBuf> {
-    let target = PathBuf::from(path);
-    let target = if target.is_absolute() {
-        target
+fn confined_path(root: &Path, path: &Path) -> AcpResult<PathBuf> {
+    let target = if path.is_absolute() {
+        path.to_path_buf()
     } else {
-        root.join(target)
+        root.join(path)
     };
     let parent = target.parent().unwrap_or(root);
     let canonical_parent = parent
         .canonicalize()
         .unwrap_or_else(|_| parent.to_path_buf());
     if !canonical_parent.starts_with(root) {
-        return Err(AppError::Acp(format!(
-            "Path outside configured pwd: {path}"
+        return Err(agent_client_protocol::util::internal_error(format!(
+            "Path outside configured pwd: {}",
+            path.display()
         )));
     }
     Ok(target)
@@ -666,24 +652,20 @@ impl TerminalResult {
         }
     }
 
-    /// Return ACP-compatible exit status JSON.
-    fn exit_status(&self) -> Value {
-        if let Some(signal) = &self.signal {
-            json!({"signal": signal})
-        } else {
-            json!({"exitCode": self.exit_code})
-        }
-    }
-
-    /// Return the terminal wait response payload.
-    fn wait_response(&self) -> Value {
-        self.exit_status()
+    /// Return ACP-compatible exit status.
+    fn exit_status(&self) -> TerminalExitStatus {
+        TerminalExitStatus::new()
+            .exit_code((self.signal.is_none()).then_some(self.exit_code.max(0) as u32))
+            .signal(self.signal.clone())
     }
 }
 
 #[cfg(test)]
 mod tests {
     //! Unit tests for ACP command resolution helpers.
+
+    use agent_client_protocol::schema::{PermissionOption, PermissionOptionKind};
+    use serde_json::json;
 
     use crate::config::AgentConfig;
 
@@ -718,20 +700,21 @@ mod tests {
     }
 
     /// Permission prompts select the narrow one-shot allow option when available.
-    #[tokio::test]
-    async fn request_permission_prefers_one_shot_allow() {
-        let response = request_permission(&json!({
-            "options": [
-                {"kind": "allow_always", "name": "Always Allow", "optionId": "allow_always"},
-                {"kind": "allow_once", "name": "Allow", "optionId": "allow"},
-                {"kind": "reject_once", "name": "Reject", "optionId": "reject"}
-            ]
-        }))
-        .await
+    #[test]
+    fn request_permission_prefers_one_shot_allow() {
+        let response = request_permission(&[
+            PermissionOption::new(
+                "allow_always",
+                "Always Allow",
+                PermissionOptionKind::AllowAlways,
+            ),
+            PermissionOption::new("allow", "Allow", PermissionOptionKind::AllowOnce),
+            PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
+        ])
         .unwrap();
 
         assert_eq!(
-            response,
+            serde_json::to_value(response).unwrap(),
             json!({"outcome": {"outcome": "selected", "optionId": "allow"}})
         );
     }
