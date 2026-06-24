@@ -42,6 +42,11 @@ server:
   token: admin
   url: http://localhost:8080
 
+# Optional: required for Smartsheet-backed boards.
+smartsheet:
+  token: ${SMARTSHEET_TOKEN}
+  url: https://api.smartsheet.com/2.0
+
 worker:
   max_concurrency: 1
   poll_interval: 10
@@ -67,6 +72,17 @@ boards:
     working: "In Process"
     blocked: "Escalate"
     done: "Complete"
+  - provider: smartsheet
+    id: 1234567890123456
+    status_column: "Status"
+    assignee_column: "Assigned To"
+    title_column: "Task"
+    description_column: "Spec"
+    metadata_column: "Agent Metadata"
+    todo: "Intake"
+    working: "In Process"
+    blocked: "Escalate"
+    done: "Complete"
 ```
 
 Environment variables can override machine-local values:
@@ -78,11 +94,23 @@ KANBOARD_TOKEN=admin
 WORKER_MAX_CONCURRENCY=2
 WORKER_POLL_INTERVAL=10
 AGENT_PWD=/path/to/checkout
+SMARTSHEET_TOKEN=smartsheet-access-token
+SMARTSHEET_URL=https://api.smartsheet.com/2.0
 ```
 
 Kanboard's API endpoint is `/jsonrpc.php`; if the configured URL is the server
 root, the worker appends that path automatically. User API auth uses HTTP Basic
 auth with the Kanboard username and either password or personal access token.
+
+Smartsheet-backed boards use `provider: smartsheet` and treat one sheet as a
+board. `id` is the sheet id. The configured `status_column` stores the workflow
+status values from `todo`, `working`, `blocked`, and `done`; `assignee_column`
+must contain the worker identity from `server.user`; `title_column` becomes the
+card title; `description_column` is optional card/spec text. `metadata_column` is
+optional but recommended if you want ACP session ids to persist between turns.
+Smartsheet row ids are exposed to agents as `sheet_id:row_id` in MCP tools.
+Subtasks and internal dependency links are Kanboard-only; Smartsheet rows support
+claiming, comments/discussions, attachments, and status moves.
 
 `agent.pwd` is the working directory used when starting the local agent command.
 Relative paths are resolved from the config file's directory. The directory must

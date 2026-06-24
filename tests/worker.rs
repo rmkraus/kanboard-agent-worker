@@ -247,6 +247,7 @@ fn config() -> AppConfig {
             token: "secret".to_string(),
             url: "http://localhost:8080".to_string(),
         },
+        smartsheet: None,
         worker: WorkerSettings {
             max_concurrency: 1,
             poll_interval: 10,
@@ -259,11 +260,17 @@ fn config() -> AppConfig {
             timeout_seconds: 3600,
         },
         boards: vec![BoardConfig {
+            provider: kanboard_agent_worker::config::BoardProvider::Kanboard,
             id: json!(1),
             todo: "Ready".to_string(),
             working: "In Progress".to_string(),
             blocked: "Blocked".to_string(),
             done: "Done".to_string(),
+            status_column: None,
+            assignee_column: None,
+            title_column: None,
+            description_column: None,
+            metadata_column: None,
         }],
         roster: Vec::new(),
     }

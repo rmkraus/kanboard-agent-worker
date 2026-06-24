@@ -67,7 +67,7 @@ pub struct AcpSession {
     session_id: Option<String>,
     /// Maximum duration allowed for one agent prompt turn.
     timeout_seconds: u64,
-    /// Worker configuration forwarded to the embedded Kanboard MCP server.
+    /// Worker configuration forwarded to the embedded board MCP server.
     app_config: AppConfig,
 }
 
@@ -138,6 +138,11 @@ pub fn boards_env(boards: &[BoardConfig]) -> String {
     serde_json::to_string(boards).unwrap_or_else(|_| "[]".to_string())
 }
 
+/// Serialize optional Smartsheet config for the MCP server environment.
+pub fn smartsheet_env(config: &Option<crate::config::SmartsheetConfig>) -> String {
+    serde_json::to_string(config).unwrap_or_else(|_| "null".to_string())
+}
+
 /// Run one ACP turn using the official SDK connection and session APIs.
 async fn run_sdk_turn(
     command: Vec<String>,
@@ -148,7 +153,7 @@ async fn run_sdk_turn(
 ) -> Result<AgentTurn> {
     let client_state = ClientState::new(root.clone());
     let agent = agent_for_config(&command, &root, &app_config)?;
-    let mcp_servers = mcp_servers(&root, &app_config.boards)?;
+    let mcp_servers = mcp_servers(&root, &app_config)?;
     Client
         .builder()
         .name("kanboard-agent-worker")
@@ -264,6 +269,7 @@ fn agent_for_config(command: &[String], root: &Path, app_config: &AppConfig) -> 
                 EnvVariable::new("KANBOARD_USER", app_config.server.user.clone()),
                 EnvVariable::new("KANBOARD_TOKEN", app_config.server.token.clone()),
                 EnvVariable::new("KANBOARD_WORKER_BOARDS", boards_env(&app_config.boards)),
+                EnvVariable::new("SMARTSHEET_CONFIG", smartsheet_env(&app_config.smartsheet)),
                 EnvVariable::new("KANBOARD_AGENT_PWD", root.to_string_lossy().to_string()),
             ]),
     )))
@@ -313,16 +319,20 @@ async fn start_or_load_session(
         .await
 }
 
-/// Build the Kanboard MCP server descriptor for `session/new` or `session/load`.
-fn mcp_servers(root: &Path, boards: &[BoardConfig]) -> Result<Vec<McpServer>> {
+/// Build the board MCP server descriptor for `session/new` or `session/load`.
+fn mcp_servers(root: &Path, config: &AppConfig) -> Result<Vec<McpServer>> {
     Ok(vec![McpServer::Stdio(
         McpServerStdio::new(
-            "kanboard",
+            "boards",
             std::env::current_exe().unwrap_or_else(|_| PathBuf::from("kanboard-agent-worker")),
         )
         .args(vec!["mcp".to_string()])
         .env(vec![
-            EnvVariable::new("KANBOARD_WORKER_BOARDS", boards_env(boards)),
+            EnvVariable::new("KANBOARD_URL", config.server.url.clone()),
+            EnvVariable::new("KANBOARD_USER", config.server.user.clone()),
+            EnvVariable::new("KANBOARD_TOKEN", config.server.token.clone()),
+            EnvVariable::new("KANBOARD_WORKER_BOARDS", boards_env(&config.boards)),
+            EnvVariable::new("SMARTSHEET_CONFIG", smartsheet_env(&config.smartsheet)),
             EnvVariable::new("KANBOARD_AGENT_PWD", root.to_string_lossy().to_string()),
         ]),
     )])

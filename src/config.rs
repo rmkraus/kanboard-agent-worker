@@ -21,19 +21,73 @@ pub struct ServerConfig {
     pub url: String,
 }
 
-/// Column mapping for one Kanboard project.
+/// Smartsheet credentials and API root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmartsheetConfig {
+    /// Smartsheet API access token.
+    pub token: String,
+    /// Smartsheet API base URL, normally `https://api.smartsheet.com/2.0`.
+    pub url: String,
+}
+
+impl Default for SmartsheetConfig {
+    fn default() -> Self {
+        Self {
+            token: String::new(),
+            url: "https://api.smartsheet.com/2.0".to_string(),
+        }
+    }
+}
+
+/// Backing service used by a configured board.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BoardProvider {
+    /// Kanboard JSON-RPC project.
+    #[default]
+    Kanboard,
+    /// Smartsheet sheet adapted into board operations.
+    Smartsheet,
+}
+
+/// Column mapping for one Kanboard project or Smartsheet sheet.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoardConfig {
-    /// Kanboard project id.
+    /// Backing service for this board. Defaults to Kanboard for existing configs.
+    #[serde(default)]
+    pub provider: BoardProvider,
+    /// Kanboard project id or Smartsheet sheet id.
     pub id: Value,
-    /// Queue column name where work is considered ready.
+    /// Queue column name/status where work is considered ready.
     pub todo: String,
-    /// Column name used while an agent is actively working.
+    /// Column name/status used while an agent is actively working.
     pub working: String,
-    /// Column name used when the worker or agent needs human help.
+    /// Column name/status used when the worker or agent needs human help.
     pub blocked: String,
-    /// Column name used for completed work.
+    /// Column name/status used for completed work.
     pub done: String,
+    /// Smartsheet status column title. Required when `provider: smartsheet`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_column: Option<String>,
+    /// Smartsheet assignee column title. Required when `provider: smartsheet`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee_column: Option<String>,
+    /// Smartsheet title column title. Required when `provider: smartsheet`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_column: Option<String>,
+    /// Optional Smartsheet description/spec column title.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description_column: Option<String>,
+    /// Optional Smartsheet column used to persist worker metadata as JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_column: Option<String>,
+}
+
+impl BoardConfig {
+    /// Return true when this board is backed by Smartsheet.
+    pub fn is_smartsheet(&self) -> bool {
+        self.provider == BoardProvider::Smartsheet
+    }
 }
 
 /// Settings for launching the local ACP-compatible agent process.
@@ -74,6 +128,8 @@ pub struct RosterEntry {
 pub struct AppConfig {
     /// Kanboard connection and identity settings.
     pub server: ServerConfig,
+    /// Optional Smartsheet connection settings for `provider: smartsheet` boards.
+    pub smartsheet: Option<SmartsheetConfig>,
     /// Worker loop behavior.
     pub worker: WorkerSettings,
     /// ACP agent launch behavior.
@@ -89,6 +145,8 @@ pub struct AppConfig {
 struct RawConfig {
     /// Optional raw server section.
     server: Option<RawServer>,
+    /// Optional raw Smartsheet section.
+    smartsheet: Option<RawSmartsheet>,
     /// Optional raw worker settings section.
     worker: Option<RawWorker>,
     /// Optional raw agent launch section.
@@ -107,6 +165,15 @@ struct RawServer {
     /// Optional Kanboard API token or password.
     token: Option<String>,
     /// Optional Kanboard base URL.
+    url: Option<String>,
+}
+
+/// Raw Smartsheet section before environment overrides are applied.
+#[derive(Debug, Deserialize)]
+struct RawSmartsheet {
+    /// Optional Smartsheet API token.
+    token: Option<String>,
+    /// Optional Smartsheet API base URL.
     url: Option<String>,
 }
 
@@ -139,16 +206,28 @@ struct RawAgent {
 /// Raw board mapping before required-field validation.
 #[derive(Debug, Deserialize)]
 struct RawBoard {
-    /// Optional Kanboard project id.
+    /// Optional backing provider.
+    provider: Option<BoardProvider>,
+    /// Optional Kanboard project id or Smartsheet sheet id.
     id: Option<Value>,
-    /// Optional ready column title.
+    /// Optional ready column title/status.
     todo: Option<String>,
-    /// Optional in-progress column title.
+    /// Optional in-progress column title/status.
     working: Option<String>,
-    /// Optional blocked column title.
+    /// Optional blocked column title/status.
     blocked: Option<String>,
-    /// Optional done column title.
+    /// Optional done column title/status.
     done: Option<String>,
+    /// Optional Smartsheet status column title.
+    status_column: Option<String>,
+    /// Optional Smartsheet assignee column title.
+    assignee_column: Option<String>,
+    /// Optional Smartsheet title column title.
+    title_column: Option<String>,
+    /// Optional Smartsheet description/spec column title.
+    description_column: Option<String>,
+    /// Optional Smartsheet metadata column title.
+    metadata_column: Option<String>,
 }
 
 /// Raw roster entry before required-name validation.
@@ -205,6 +284,7 @@ pub fn load_config(path: impl AsRef<Path>) -> Result<AppConfig> {
         token: env_or_value("KANBOARD_TOKEN", server_raw.token, "server.token")?,
         url: env_or_value("KANBOARD_URL", server_raw.url, "server.url")?,
     };
+    let smartsheet = smartsheet_from_raw(raw.smartsheet)?;
     let worker = WorkerSettings {
         max_concurrency: positive_int_env(
             "WORKER_MAX_CONCURRENCY",
@@ -256,6 +336,7 @@ pub fn load_config(path: impl AsRef<Path>) -> Result<AppConfig> {
 
     Ok(AppConfig {
         server,
+        smartsheet,
         worker,
         agent,
         boards,
@@ -270,6 +351,28 @@ fn env_or_value(env_name: &str, value: Option<String>, path: &str) -> Result<Str
         return Err(AppError::Config(format!("{path} is required")));
     }
     Ok(value)
+}
+
+/// Build optional Smartsheet config from YAML and environment overrides.
+fn smartsheet_from_raw(raw: Option<RawSmartsheet>) -> Result<Option<SmartsheetConfig>> {
+    let token = env::var("SMARTSHEET_TOKEN")
+        .ok()
+        .or_else(|| raw.as_ref().and_then(|raw| raw.token.clone()))
+        .unwrap_or_default();
+    let url = env::var("SMARTSHEET_URL")
+        .ok()
+        .or_else(|| raw.as_ref().and_then(|raw| raw.url.clone()))
+        .unwrap_or_else(|| SmartsheetConfig::default().url);
+    if token.trim().is_empty() && raw.is_none() {
+        Ok(None)
+    } else if token.trim().is_empty() {
+        Err(AppError::Config(
+            "smartsheet.token is required when smartsheet config or provider: smartsheet boards are used"
+                .to_string(),
+        ))
+    } else {
+        Ok(Some(SmartsheetConfig { token, url }))
+    }
 }
 
 /// Parse a positive integer from an environment override, YAML value, or default.
@@ -337,6 +440,7 @@ fn agent_pwd(value: Option<String>, config_dir: &Path) -> Result<String> {
 
 /// Validate and convert one raw board mapping.
 fn board_from_raw(raw: RawBoard, index: usize) -> Result<BoardConfig> {
+    let provider = raw.provider.unwrap_or_default();
     let missing = [
         ("id", raw.id.is_none()),
         ("todo", raw.todo.as_deref().unwrap_or("").is_empty()),
@@ -353,12 +457,45 @@ fn board_from_raw(raw: RawBoard, index: usize) -> Result<BoardConfig> {
             missing.join(", ")
         )));
     }
+    let smartsheet_missing = if provider == BoardProvider::Smartsheet {
+        [
+            (
+                "status_column",
+                raw.status_column.as_deref().unwrap_or("").is_empty(),
+            ),
+            (
+                "assignee_column",
+                raw.assignee_column.as_deref().unwrap_or("").is_empty(),
+            ),
+            (
+                "title_column",
+                raw.title_column.as_deref().unwrap_or("").is_empty(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(name, missing)| missing.then_some(name))
+        .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if !smartsheet_missing.is_empty() {
+        return Err(AppError::Config(format!(
+            "boards[{index}] provider smartsheet missing required fields: {}",
+            smartsheet_missing.join(", ")
+        )));
+    }
     Ok(BoardConfig {
+        provider,
         id: raw.id.unwrap(),
         todo: raw.todo.unwrap(),
         working: raw.working.unwrap(),
         blocked: raw.blocked.unwrap(),
         done: raw.done.unwrap(),
+        status_column: raw.status_column,
+        assignee_column: raw.assignee_column,
+        title_column: raw.title_column,
+        description_column: raw.description_column,
+        metadata_column: raw.metadata_column,
     })
 }
 
@@ -473,7 +610,47 @@ roster:
             loaded.agent.pwd,
             temp.path().canonicalize().unwrap().to_string_lossy()
         );
+        assert_eq!(loaded.boards[0].provider, BoardProvider::Kanboard);
         assert_eq!(loaded.boards[0].todo, "Ready");
         assert_eq!(loaded.roster[0].name, "claude");
+    }
+
+    /// Smartsheet boards require the columns needed to adapt rows into cards.
+    #[test]
+    fn loads_smartsheet_board_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config.yml");
+        fs::write(
+            &config,
+            r#"
+server:
+  user: worker@example.com
+  token: admin
+  url: http://localhost:8080
+smartsheet:
+  token: sheet-token
+agent:
+  pwd: .
+boards:
+  - provider: smartsheet
+    id: 123456
+    status_column: Status
+    assignee_column: Assigned To
+    title_column: Task
+    description_column: Spec
+    metadata_column: Metadata
+    todo: Ready
+    working: In Progress
+    blocked: Blocked
+    done: Done
+"#,
+        )
+        .unwrap();
+
+        let loaded = load_config(&config).unwrap();
+
+        assert_eq!(loaded.smartsheet.unwrap().token, "sheet-token");
+        assert!(loaded.boards[0].is_smartsheet());
+        assert_eq!(loaded.boards[0].status_column.as_deref(), Some("Status"));
     }
 }

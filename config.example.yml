@@ -3,6 +3,11 @@ server:
   token: admin
   url: http://localhost:8080
 
+# Optional: required when any board uses `provider: smartsheet`.
+smartsheet:
+  token: ${SMARTSHEET_TOKEN}
+  url: https://api.smartsheet.com/2.0
+
 worker:
   max_concurrency: 1
   poll_interval: 10
@@ -24,6 +29,19 @@ agent:
 
 boards:
   - id: 1
+    todo: "Intake"
+    working: "In Process"
+    blocked: "Escalate"
+    done: "Complete"
+  # Smartsheet sheet-backed board. The status cell stores one of the four
+  # workflow values below; assignee must match server.user.
+  - provider: smartsheet
+    id: 1234567890123456
+    status_column: "Status"
+    assignee_column: "Assigned To"
+    title_column: "Task"
+    description_column: "Spec"
+    metadata_column: "Agent Metadata"
     todo: "Intake"
     working: "In Process"
     blocked: "Escalate"

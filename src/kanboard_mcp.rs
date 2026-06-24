@@ -19,15 +19,16 @@ use tokio::fs;
 
 use crate::{
     AppError,
-    config::BoardConfig,
+    config::{BoardConfig, SmartsheetConfig},
     kanboard::{KanboardApi, KanboardClient, column_lookup, value_id},
+    smartsheet::SmartsheetClient,
 };
 
 /// Result type used by MCP tool implementations.
 type AppResult<T> = std::result::Result<T, AppError>;
 
 /// Instructions attached to the MCP server metadata.
-const TOOL_INSTRUCTIONS: &str = "Kanboard task tools. Use these tools for task files, task comments, subtasks, and moving cards between configured board columns.";
+const TOOL_INSTRUCTIONS: &str = "Board task tools. Use these tools for Kanboard or Smartsheet task files, task comments, subtasks where supported, and moving cards/rows between configured workflow columns.";
 
 /// RMCP server exposing Kanboard task tools.
 #[derive(Debug, Clone)]
@@ -56,8 +57,8 @@ impl Default for KanboardMcpServer {
 /// Parameters for listing task attachments.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListAttachments {
-    /// Kanboard task id whose files should be listed.
-    task_id: i64,
+    /// Kanboard task id or Smartsheet encoded task id (`sheet_id:row_id`) whose files should be listed.
+    task_id: String,
 }
 
 /// Parameters for downloading an attachment.
@@ -79,10 +80,10 @@ pub struct DeleteAttachment {
 /// Parameters for uploading a file as a task attachment.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct UploadAttachment {
-    /// Kanboard project id containing the task.
-    project_id: i64,
-    /// Kanboard task id that should receive the file.
-    task_id: i64,
+    /// Kanboard project id or Smartsheet sheet id containing the task.
+    project_id: String,
+    /// Kanboard task id or Smartsheet encoded task id (`sheet_id:row_id`) that should receive the file.
+    task_id: String,
     /// Agent-local source path to upload.
     path: String,
     /// Optional filename to store in Kanboard.
@@ -92,8 +93,8 @@ pub struct UploadAttachment {
 /// Parameters for creating a task comment.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AddComment {
-    /// Kanboard task id to comment on.
-    task_id: i64,
+    /// Kanboard task id or Smartsheet encoded task id (`sheet_id:row_id`) to comment on.
+    task_id: String,
     /// Markdown comment body.
     comment: String,
 }
@@ -101,8 +102,8 @@ pub struct AddComment {
 /// Parameters for creating a subtask.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AddSubtask {
-    /// Parent Kanboard task id.
-    task_id: i64,
+    /// Parent Kanboard task id. Smartsheet boards do not support subtasks.
+    task_id: String,
     /// Subtask title.
     title: String,
     /// Optional Kanboard username to assign.
@@ -112,10 +113,10 @@ pub struct AddSubtask {
 /// Parameters for moving a card to a configured logical column.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MoveColumn {
-    /// Kanboard project id containing the task.
-    project_id: i64,
-    /// Kanboard task id to move.
-    task_id: i64,
+    /// Kanboard project id or Smartsheet sheet id containing the task.
+    project_id: String,
+    /// Kanboard task id or Smartsheet encoded task id (`sheet_id:row_id`) to move.
+    task_id: String,
     /// Logical target column: `todo`, `working`, `blocked`, or `done`.
     column: String,
     /// Optional swimlane id used when the task payload lacks one.
@@ -124,14 +125,14 @@ pub struct MoveColumn {
 
 #[tool_router]
 impl KanboardMcpServer {
-    /// List files attached to a Kanboard task.
-    #[tool(description = "List files attached to a Kanboard task.")]
+    /// List files attached to a Kanboard or Smartsheet task.
+    #[tool(description = "List files attached to a Kanboard task or Smartsheet row.")]
     pub async fn list_attachments(&self, Parameters(req): Parameters<ListAttachments>) -> String {
-        tool_json(list_attachments_impl(&client(), req.task_id).await)
+        tool_json(list_attachments_impl(&client_for_task(&req.task_id), &req.task_id).await)
     }
 
     /// Download an attachment into the agent working directory.
-    #[tool(description = "Download a Kanboard task attachment to a local file path.")]
+    #[tool(description = "Download a Kanboard or Smartsheet task attachment to a local file path.")]
     pub async fn get_attachment(&self, Parameters(req): Parameters<GetAttachment>) -> String {
         tool_json(get_attachment_impl(&client(), req.file_id, &req.output_path).await)
     }
@@ -147,9 +148,9 @@ impl KanboardMcpServer {
     pub async fn upload_attachment(&self, Parameters(req): Parameters<UploadAttachment>) -> String {
         tool_json(
             upload_attachment_impl(
-                &client(),
-                req.project_id,
-                req.task_id,
+                &client_for_board(&req.project_id),
+                &req.project_id,
+                &req.task_id,
                 &req.path,
                 req.filename.as_deref(),
             )
@@ -157,17 +158,27 @@ impl KanboardMcpServer {
         )
     }
 
-    /// Add a comment as the authenticated Kanboard user.
-    #[tool(description = "Add a comment to a Kanboard task as the authenticated worker user.")]
+    /// Add a comment as the authenticated board user.
+    #[tool(
+        description = "Add a comment to a Kanboard task or Smartsheet row as the authenticated worker user."
+    )]
     pub async fn add_comment(&self, Parameters(req): Parameters<AddComment>) -> String {
-        tool_json(add_comment_impl(&client(), req.task_id, &req.comment).await)
+        tool_json(
+            add_comment_impl(&client_for_task(&req.task_id), &req.task_id, &req.comment).await,
+        )
     }
 
     /// Create a subtask and optionally assign it to a roster user.
     #[tool(description = "Add a subtask to a Kanboard task and optionally assign it to a user.")]
     pub async fn add_subtask(&self, Parameters(req): Parameters<AddSubtask>) -> String {
         tool_json(
-            add_subtask_impl(&client(), req.task_id, &req.title, req.assignee.as_deref()).await,
+            add_subtask_impl(
+                &client_for_task(&req.task_id),
+                &req.task_id,
+                &req.title,
+                req.assignee.as_deref(),
+            )
+            .await,
         )
     }
 
@@ -178,9 +189,9 @@ impl KanboardMcpServer {
     pub async fn move_column(&self, Parameters(req): Parameters<MoveColumn>) -> String {
         tool_json(
             move_column_impl(
-                &client(),
-                req.project_id,
-                req.task_id,
+                &client_for_board(&req.project_id),
+                &req.project_id,
+                &req.task_id,
                 &req.column,
                 req.swimlane_id.unwrap_or(0),
             )
@@ -199,7 +210,7 @@ impl ServerHandler for KanboardMcpServer {
 }
 
 /// List all files attached to a Kanboard task.
-pub async fn list_attachments_impl<C: KanboardApi>(client: &C, task_id: i64) -> AppResult<Value> {
+pub async fn list_attachments_impl<C: KanboardApi>(client: &C, task_id: &str) -> AppResult<Value> {
     Ok(Value::Array(
         client.get_all_task_files(&json!(task_id)).await?,
     ))
@@ -229,8 +240,8 @@ pub async fn delete_attachment_impl<C: KanboardApi>(client: &C, file_id: i64) ->
 /// Upload a confined local file to a Kanboard task.
 pub async fn upload_attachment_impl<C: KanboardApi>(
     client: &C,
-    project_id: i64,
-    task_id: i64,
+    project_id: &str,
+    task_id: &str,
     path: &str,
     filename: Option<&str>,
 ) -> AppResult<Value> {
@@ -253,7 +264,7 @@ pub async fn upload_attachment_impl<C: KanboardApi>(
 /// Add a comment to a Kanboard task as the authenticated user.
 pub async fn add_comment_impl<C: KanboardApi>(
     client: &C,
-    task_id: i64,
+    task_id: &str,
     comment: &str,
 ) -> AppResult<Value> {
     let user = client.get_me().await?;
@@ -266,7 +277,7 @@ pub async fn add_comment_impl<C: KanboardApi>(
 /// Create a Kanboard subtask with an optional assignee username.
 pub async fn add_subtask_impl<C: KanboardApi>(
     client: &C,
-    task_id: i64,
+    task_id: &str,
     title: &str,
     assignee: Option<&str>,
 ) -> AppResult<Value> {
@@ -285,8 +296,8 @@ pub async fn add_subtask_impl<C: KanboardApi>(
 /// Move a task to a configured logical column.
 pub async fn move_column_impl<C: KanboardApi>(
     client: &C,
-    project_id: i64,
-    task_id: i64,
+    project_id: &str,
+    task_id: &str,
     column: &str,
     swimlane_id: i64,
 ) -> AppResult<Value> {
@@ -334,25 +345,278 @@ pub async fn move_column_impl<C: KanboardApi>(
     }))
 }
 
-/// Build a Kanboard client from MCP environment variables.
-fn client() -> KanboardClient {
-    KanboardClient::new(
+/// Runtime board API client used by MCP tools.
+#[derive(Debug, Clone)]
+enum McpClient {
+    /// Kanboard JSON-RPC client.
+    Kanboard(KanboardClient),
+    /// Smartsheet REST adapter.
+    Smartsheet(SmartsheetClient),
+}
+
+#[async_trait::async_trait]
+impl KanboardApi for McpClient {
+    async fn get_me(&self) -> crate::Result<Value> {
+        match self {
+            Self::Kanboard(client) => client.get_me().await,
+            Self::Smartsheet(client) => client.get_me().await,
+        }
+    }
+
+    async fn get_board(&self, project_id: &Value) -> crate::Result<Vec<Value>> {
+        match self {
+            Self::Kanboard(client) => client.get_board(project_id).await,
+            Self::Smartsheet(client) => client.get_board(project_id).await,
+        }
+    }
+
+    async fn get_columns(&self, project_id: &Value) -> crate::Result<Vec<Value>> {
+        match self {
+            Self::Kanboard(client) => client.get_columns(project_id).await,
+            Self::Smartsheet(client) => client.get_columns(project_id).await,
+        }
+    }
+
+    async fn get_task(&self, task_id: &Value) -> crate::Result<Value> {
+        match self {
+            Self::Kanboard(client) => client.get_task(task_id).await,
+            Self::Smartsheet(client) => client.get_task(task_id).await,
+        }
+    }
+
+    async fn get_user_by_name(&self, username: &str) -> crate::Result<Value> {
+        match self {
+            Self::Kanboard(client) => client.get_user_by_name(username).await,
+            Self::Smartsheet(_) => {
+                Ok(json!({"id": username, "username": username, "email": username}))
+            }
+        }
+    }
+
+    async fn get_all_comments(&self, task_id: &Value) -> crate::Result<Vec<Value>> {
+        match self {
+            Self::Kanboard(client) => client.get_all_comments(task_id).await,
+            Self::Smartsheet(client) => client.get_all_comments(task_id).await,
+        }
+    }
+
+    async fn create_comment(
+        &self,
+        task_id: &Value,
+        user_id: &Value,
+        content: &str,
+    ) -> crate::Result<i64> {
+        match self {
+            Self::Kanboard(client) => client.create_comment(task_id, user_id, content).await,
+            Self::Smartsheet(client) => client.create_comment(task_id, content).await,
+        }
+    }
+
+    async fn get_task_metadata(
+        &self,
+        task_id: &Value,
+    ) -> crate::Result<serde_json::Map<String, Value>> {
+        match self {
+            Self::Kanboard(client) => client.get_task_metadata(task_id).await,
+            Self::Smartsheet(client) => client.get_task_metadata(task_id).await,
+        }
+    }
+
+    async fn save_task_metadata(
+        &self,
+        task_id: &Value,
+        values: serde_json::Map<String, Value>,
+    ) -> crate::Result<()> {
+        match self {
+            Self::Kanboard(client) => client.save_task_metadata(task_id, values).await,
+            Self::Smartsheet(client) => client.save_task_metadata(task_id, values).await,
+        }
+    }
+
+    async fn get_all_subtasks(&self, task_id: &Value) -> crate::Result<Vec<Value>> {
+        match self {
+            Self::Kanboard(client) => client.get_all_subtasks(task_id).await,
+            Self::Smartsheet(_) => Ok(Vec::new()),
+        }
+    }
+
+    async fn get_all_task_links(&self, task_id: &Value) -> crate::Result<Vec<Value>> {
+        match self {
+            Self::Kanboard(client) => client.get_all_task_links(task_id).await,
+            Self::Smartsheet(_) => Ok(Vec::new()),
+        }
+    }
+
+    async fn get_all_task_files(&self, task_id: &Value) -> crate::Result<Vec<Value>> {
+        match self {
+            Self::Kanboard(client) => client.get_all_task_files(task_id).await,
+            Self::Smartsheet(client) => client.get_all_task_files(task_id).await,
+        }
+    }
+
+    async fn download_task_file(&self, file_id: &Value) -> crate::Result<Vec<u8>> {
+        match self {
+            Self::Kanboard(client) => client.download_task_file(file_id).await,
+            Self::Smartsheet(client) => client.download_task_file(file_id, None).await,
+        }
+    }
+
+    async fn create_task_file(
+        &self,
+        project_id: &Value,
+        task_id: &Value,
+        filename: &str,
+        content: &[u8],
+    ) -> crate::Result<i64> {
+        match self {
+            Self::Kanboard(client) => {
+                client
+                    .create_task_file(project_id, task_id, filename, content)
+                    .await
+            }
+            Self::Smartsheet(client) => {
+                client
+                    .create_task_file(project_id, task_id, filename, content)
+                    .await
+            }
+        }
+    }
+
+    async fn remove_task_file(&self, file_id: &Value) -> crate::Result<()> {
+        match self {
+            Self::Kanboard(client) => client.remove_task_file(file_id).await,
+            Self::Smartsheet(client) => client.remove_task_file(file_id).await,
+        }
+    }
+
+    async fn create_subtask(
+        &self,
+        task_id: &Value,
+        title: &str,
+        user_id: &Value,
+        status: i64,
+    ) -> crate::Result<i64> {
+        match self {
+            Self::Kanboard(client) => client.create_subtask(task_id, title, user_id, status).await,
+            Self::Smartsheet(_) => Err(AppError::Kanboard(
+                "Smartsheet boards do not support subtasks".to_string(),
+            )),
+        }
+    }
+
+    async fn update_subtask(
+        &self,
+        subtask_id: &Value,
+        task_id: &Value,
+        title: Option<&str>,
+        user_id: Option<&Value>,
+        status: Option<i64>,
+    ) -> crate::Result<()> {
+        match self {
+            Self::Kanboard(client) => {
+                client
+                    .update_subtask(subtask_id, task_id, title, user_id, status)
+                    .await
+            }
+            Self::Smartsheet(_) => Ok(()),
+        }
+    }
+
+    async fn has_subtask_timer(&self, subtask_id: &Value, user_id: &Value) -> crate::Result<bool> {
+        match self {
+            Self::Kanboard(client) => client.has_subtask_timer(subtask_id, user_id).await,
+            Self::Smartsheet(_) => Ok(false),
+        }
+    }
+
+    async fn start_subtask_timer(&self, subtask_id: &Value, user_id: &Value) -> crate::Result<()> {
+        match self {
+            Self::Kanboard(client) => client.start_subtask_timer(subtask_id, user_id).await,
+            Self::Smartsheet(_) => Ok(()),
+        }
+    }
+
+    async fn stop_subtask_timer(&self, subtask_id: &Value, user_id: &Value) -> crate::Result<()> {
+        match self {
+            Self::Kanboard(client) => client.stop_subtask_timer(subtask_id, user_id).await,
+            Self::Smartsheet(_) => Ok(()),
+        }
+    }
+
+    async fn move_task_to_column(
+        &self,
+        project_id: &Value,
+        task_id: &Value,
+        column_id: &Value,
+        swimlane_id: &Value,
+        position: i64,
+    ) -> crate::Result<()> {
+        match self {
+            Self::Kanboard(client) => {
+                client
+                    .move_task_to_column(project_id, task_id, column_id, swimlane_id, position)
+                    .await
+            }
+            Self::Smartsheet(client) => {
+                client
+                    .move_task_to_column(project_id, task_id, column_id)
+                    .await
+            }
+        }
+    }
+}
+
+/// Build the default Kanboard client from MCP environment variables.
+fn client() -> McpClient {
+    McpClient::Kanboard(KanboardClient::new(
         env::var("KANBOARD_URL").unwrap_or_default(),
         env::var("KANBOARD_USER").unwrap_or_default(),
         env::var("KANBOARD_TOKEN").unwrap_or_default(),
-    )
+    ))
 }
 
-/// Find the configured board mapping for a Kanboard project id.
-fn configured_board(project_id: i64) -> AppResult<BoardConfig> {
-    let boards: Vec<BoardConfig> =
-        serde_json::from_str(&env::var("KANBOARD_WORKER_BOARDS").unwrap_or_else(|_| "[]".into()))?;
-    boards
+/// Build the API client for a board id.
+fn client_for_board(project_id: &str) -> McpClient {
+    let board = configured_board(project_id).ok();
+    if board.as_ref().is_some_and(BoardConfig::is_smartsheet) {
+        McpClient::Smartsheet(SmartsheetClient::new(
+            smartsheet_config().as_ref(),
+            env::var("KANBOARD_USER").unwrap_or_default(),
+            configured_boards(),
+        ))
+    } else {
+        client()
+    }
+}
+
+/// Build the API client for a task id.
+fn client_for_task(task_id: &str) -> McpClient {
+    task_id
+        .split_once(':')
+        .map(|(sheet_id, _)| client_for_board(sheet_id))
+        .unwrap_or_else(client)
+}
+
+/// Return configured Smartsheet connection settings from MCP environment variables.
+fn smartsheet_config() -> Option<SmartsheetConfig> {
+    serde_json::from_str(&env::var("SMARTSHEET_CONFIG").unwrap_or_else(|_| "null".to_string()))
+        .unwrap_or(None)
+}
+
+/// Return all configured board mappings from MCP environment variables.
+fn configured_boards() -> Vec<BoardConfig> {
+    serde_json::from_str(&env::var("KANBOARD_WORKER_BOARDS").unwrap_or_else(|_| "[]".into()))
+        .unwrap_or_default()
+}
+
+/// Find the configured board mapping for a Kanboard project id or Smartsheet sheet id.
+fn configured_board(project_id: &str) -> AppResult<BoardConfig> {
+    configured_boards()
         .into_iter()
-        .find(|board| board.id.to_string().trim_matches('"') == project_id.to_string())
+        .find(|board| board.id.to_string().trim_matches('"') == project_id)
         .ok_or_else(|| {
             AppError::Kanboard(format!(
-                "Project {project_id} is not configured for this worker"
+                "Project/sheet {project_id} is not configured for this worker"
             ))
         })
 }
