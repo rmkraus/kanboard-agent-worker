@@ -16,6 +16,8 @@ pub mod kanboard;
 pub mod kanboard_mcp;
 /// Prompt rendering for Kanboard task descriptions and comments.
 pub mod prompt;
+/// Smartsheet REST client and Kanboard-compatible adapter helpers.
+pub mod smartsheet;
 /// Worker lifecycle: polling, claiming, executing, and routing cards.
 pub mod worker;
 

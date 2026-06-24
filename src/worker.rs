@@ -24,6 +24,7 @@ use crate::{
         value_str,
     },
     prompt::build_agent_prompt,
+    smartsheet::SmartsheetClient,
 };
 
 /// Comment posted when the worker claims a top-level task.
@@ -75,17 +76,437 @@ pub struct Worker<C> {
     pub user_id: Value,
 }
 
-impl Worker<KanboardClient> {
-    /// Build a production worker from config using the real HTTP Kanboard client.
-    ///
-    /// This constructor also calls `getMe` once so comments can be posted with
-    /// the authenticated user's numeric Kanboard id.
+#[derive(Debug, Clone)]
+pub enum BoardClient<C> {
+    /// Kanboard API implementation.
+    Kanboard(C),
+    /// Smartsheet adapter implementation.
+    Smartsheet(SmartsheetClient),
+    /// Mixed Kanboard projects and Smartsheet sheets in one worker.
+    Hybrid {
+        /// Kanboard API implementation.
+        kanboard: C,
+        /// Smartsheet adapter implementation.
+        smartsheet: SmartsheetClient,
+        /// Configured boards used for per-board routing.
+        boards: Vec<BoardConfig>,
+    },
+}
+
+impl<C> BoardClient<C> {
+    /// Return true when a project id belongs to a configured Smartsheet board.
+    fn is_smartsheet_project(&self, project_id: &Value) -> bool {
+        let wanted = project_id.to_string().trim_matches('"').to_string();
+        match self {
+            Self::Smartsheet(_) => true,
+            Self::Hybrid { boards, .. } => boards.iter().any(|board| {
+                board.is_smartsheet() && board.id.to_string().trim_matches('"') == wanted
+            }),
+            Self::Kanboard(_) => false,
+        }
+    }
+
+    /// Return true when a task id is an encoded Smartsheet `sheet_id:row_id` task id.
+    fn is_smartsheet_task(&self, task_id: &Value) -> bool {
+        let text = task_id.to_string().trim_matches('"').to_string();
+        text.split_once(':')
+            .is_some_and(|(sheet_id, _)| self.is_smartsheet_project(&json!(sheet_id)))
+    }
+}
+
+#[async_trait::async_trait]
+impl<C: KanboardApi> KanboardApi for BoardClient<C> {
+    async fn get_me(&self) -> Result<Value> {
+        match self {
+            Self::Kanboard(client) => client.get_me().await,
+            Self::Smartsheet(client) => client.get_me().await,
+            Self::Hybrid { smartsheet, .. } => smartsheet.get_me().await,
+        }
+    }
+
+    async fn get_board(&self, project_id: &Value) -> Result<Vec<Value>> {
+        match self {
+            Self::Kanboard(client) => client.get_board(project_id).await,
+            Self::Smartsheet(client) => client.get_board(project_id).await,
+            Self::Hybrid {
+                kanboard,
+                smartsheet,
+                ..
+            } => {
+                if self.is_smartsheet_project(project_id) {
+                    smartsheet.get_board(project_id).await
+                } else {
+                    kanboard.get_board(project_id).await
+                }
+            }
+        }
+    }
+
+    async fn get_columns(&self, project_id: &Value) -> Result<Vec<Value>> {
+        match self {
+            Self::Kanboard(client) => client.get_columns(project_id).await,
+            Self::Smartsheet(client) => client.get_columns(project_id).await,
+            Self::Hybrid {
+                kanboard,
+                smartsheet,
+                ..
+            } => {
+                if self.is_smartsheet_project(project_id) {
+                    smartsheet.get_columns(project_id).await
+                } else {
+                    kanboard.get_columns(project_id).await
+                }
+            }
+        }
+    }
+
+    async fn get_task(&self, task_id: &Value) -> Result<Value> {
+        match self {
+            Self::Kanboard(client) => client.get_task(task_id).await,
+            Self::Smartsheet(client) => client.get_task(task_id).await,
+            Self::Hybrid {
+                kanboard,
+                smartsheet,
+                ..
+            } => {
+                if self.is_smartsheet_task(task_id) {
+                    smartsheet.get_task(task_id).await
+                } else {
+                    kanboard.get_task(task_id).await
+                }
+            }
+        }
+    }
+
+    async fn get_user_by_name(&self, username: &str) -> Result<Value> {
+        match self {
+            Self::Kanboard(client) => client.get_user_by_name(username).await,
+            Self::Smartsheet(_) => {
+                Ok(json!({"id": username, "username": username, "email": username}))
+            }
+            Self::Hybrid { kanboard, .. } => kanboard.get_user_by_name(username).await,
+        }
+    }
+
+    async fn get_all_comments(&self, task_id: &Value) -> Result<Vec<Value>> {
+        match self {
+            Self::Kanboard(client) => client.get_all_comments(task_id).await,
+            Self::Smartsheet(client) => client.get_all_comments(task_id).await,
+            Self::Hybrid {
+                kanboard,
+                smartsheet,
+                ..
+            } => {
+                if self.is_smartsheet_task(task_id) {
+                    smartsheet.get_all_comments(task_id).await
+                } else {
+                    kanboard.get_all_comments(task_id).await
+                }
+            }
+        }
+    }
+
+    async fn create_comment(&self, task_id: &Value, user_id: &Value, content: &str) -> Result<i64> {
+        match self {
+            Self::Kanboard(client) => client.create_comment(task_id, user_id, content).await,
+            Self::Smartsheet(client) => client.create_comment(task_id, content).await,
+            Self::Hybrid {
+                kanboard,
+                smartsheet,
+                ..
+            } => {
+                if self.is_smartsheet_task(task_id) {
+                    smartsheet.create_comment(task_id, content).await
+                } else {
+                    kanboard.create_comment(task_id, user_id, content).await
+                }
+            }
+        }
+    }
+
+    async fn get_task_metadata(&self, task_id: &Value) -> Result<serde_json::Map<String, Value>> {
+        match self {
+            Self::Kanboard(client) => client.get_task_metadata(task_id).await,
+            Self::Smartsheet(client) => client.get_task_metadata(task_id).await,
+            Self::Hybrid {
+                kanboard,
+                smartsheet,
+                ..
+            } => {
+                if self.is_smartsheet_task(task_id) {
+                    smartsheet.get_task_metadata(task_id).await
+                } else {
+                    kanboard.get_task_metadata(task_id).await
+                }
+            }
+        }
+    }
+
+    async fn save_task_metadata(
+        &self,
+        task_id: &Value,
+        values: serde_json::Map<String, Value>,
+    ) -> Result<()> {
+        match self {
+            Self::Kanboard(client) => client.save_task_metadata(task_id, values).await,
+            Self::Smartsheet(client) => client.save_task_metadata(task_id, values).await,
+            Self::Hybrid {
+                kanboard,
+                smartsheet,
+                ..
+            } => {
+                if self.is_smartsheet_task(task_id) {
+                    smartsheet.save_task_metadata(task_id, values).await
+                } else {
+                    kanboard.save_task_metadata(task_id, values).await
+                }
+            }
+        }
+    }
+
+    async fn get_all_subtasks(&self, task_id: &Value) -> Result<Vec<Value>> {
+        match self {
+            Self::Kanboard(client) => client.get_all_subtasks(task_id).await,
+            Self::Smartsheet(_) => Ok(Vec::new()),
+            Self::Hybrid { kanboard, .. } => {
+                if self.is_smartsheet_task(task_id) {
+                    Ok(Vec::new())
+                } else {
+                    kanboard.get_all_subtasks(task_id).await
+                }
+            }
+        }
+    }
+
+    async fn get_all_task_links(&self, task_id: &Value) -> Result<Vec<Value>> {
+        match self {
+            Self::Kanboard(client) => client.get_all_task_links(task_id).await,
+            Self::Smartsheet(_) => Ok(Vec::new()),
+            Self::Hybrid { kanboard, .. } => {
+                if self.is_smartsheet_task(task_id) {
+                    Ok(Vec::new())
+                } else {
+                    kanboard.get_all_task_links(task_id).await
+                }
+            }
+        }
+    }
+
+    async fn get_all_task_files(&self, task_id: &Value) -> Result<Vec<Value>> {
+        match self {
+            Self::Kanboard(client) => client.get_all_task_files(task_id).await,
+            Self::Smartsheet(client) => client.get_all_task_files(task_id).await,
+            Self::Hybrid {
+                kanboard,
+                smartsheet,
+                ..
+            } => {
+                if self.is_smartsheet_task(task_id) {
+                    smartsheet.get_all_task_files(task_id).await
+                } else {
+                    kanboard.get_all_task_files(task_id).await
+                }
+            }
+        }
+    }
+
+    async fn download_task_file(&self, file_id: &Value) -> Result<Vec<u8>> {
+        match self {
+            Self::Kanboard(client) => client.download_task_file(file_id).await,
+            Self::Smartsheet(client) => client.download_task_file(file_id, None).await,
+            Self::Hybrid { smartsheet, .. } => smartsheet.download_task_file(file_id, None).await,
+        }
+    }
+
+    async fn create_task_file(
+        &self,
+        project_id: &Value,
+        task_id: &Value,
+        filename: &str,
+        content: &[u8],
+    ) -> Result<i64> {
+        match self {
+            Self::Kanboard(client) => {
+                client
+                    .create_task_file(project_id, task_id, filename, content)
+                    .await
+            }
+            Self::Smartsheet(client) => {
+                client
+                    .create_task_file(project_id, task_id, filename, content)
+                    .await
+            }
+            Self::Hybrid {
+                kanboard,
+                smartsheet,
+                ..
+            } => {
+                if self.is_smartsheet_project(project_id) {
+                    smartsheet
+                        .create_task_file(project_id, task_id, filename, content)
+                        .await
+                } else {
+                    kanboard
+                        .create_task_file(project_id, task_id, filename, content)
+                        .await
+                }
+            }
+        }
+    }
+
+    async fn remove_task_file(&self, file_id: &Value) -> Result<()> {
+        match self {
+            Self::Kanboard(client) => client.remove_task_file(file_id).await,
+            Self::Smartsheet(client) => client.remove_task_file(file_id).await,
+            Self::Hybrid { smartsheet, .. } => smartsheet.remove_task_file(file_id).await,
+        }
+    }
+
+    async fn create_subtask(
+        &self,
+        task_id: &Value,
+        title: &str,
+        user_id: &Value,
+        status: i64,
+    ) -> Result<i64> {
+        match self {
+            Self::Kanboard(client) => client.create_subtask(task_id, title, user_id, status).await,
+            Self::Smartsheet(_) => Err(crate::AppError::Kanboard(
+                "Smartsheet boards do not support Kanboard subtasks".to_string(),
+            )),
+            Self::Hybrid { kanboard, .. } => {
+                if self.is_smartsheet_task(task_id) {
+                    Err(crate::AppError::Kanboard(
+                        "Smartsheet boards do not support Kanboard subtasks".to_string(),
+                    ))
+                } else {
+                    kanboard
+                        .create_subtask(task_id, title, user_id, status)
+                        .await
+                }
+            }
+        }
+    }
+
+    async fn update_subtask(
+        &self,
+        subtask_id: &Value,
+        task_id: &Value,
+        title: Option<&str>,
+        user_id: Option<&Value>,
+        status: Option<i64>,
+    ) -> Result<()> {
+        match self {
+            Self::Kanboard(client) => {
+                client
+                    .update_subtask(subtask_id, task_id, title, user_id, status)
+                    .await
+            }
+            Self::Smartsheet(_) => Ok(()),
+            Self::Hybrid { kanboard, .. } => {
+                if self.is_smartsheet_task(task_id) {
+                    Ok(())
+                } else {
+                    kanboard
+                        .update_subtask(subtask_id, task_id, title, user_id, status)
+                        .await
+                }
+            }
+        }
+    }
+
+    async fn has_subtask_timer(&self, subtask_id: &Value, user_id: &Value) -> Result<bool> {
+        match self {
+            Self::Kanboard(client) => client.has_subtask_timer(subtask_id, user_id).await,
+            Self::Smartsheet(_) => Ok(false),
+            Self::Hybrid { kanboard, .. } => kanboard.has_subtask_timer(subtask_id, user_id).await,
+        }
+    }
+
+    async fn start_subtask_timer(&self, subtask_id: &Value, user_id: &Value) -> Result<()> {
+        match self {
+            Self::Kanboard(client) => client.start_subtask_timer(subtask_id, user_id).await,
+            Self::Smartsheet(_) => Ok(()),
+            Self::Hybrid { kanboard, .. } => {
+                kanboard.start_subtask_timer(subtask_id, user_id).await
+            }
+        }
+    }
+
+    async fn stop_subtask_timer(&self, subtask_id: &Value, user_id: &Value) -> Result<()> {
+        match self {
+            Self::Kanboard(client) => client.stop_subtask_timer(subtask_id, user_id).await,
+            Self::Smartsheet(_) => Ok(()),
+            Self::Hybrid { kanboard, .. } => kanboard.stop_subtask_timer(subtask_id, user_id).await,
+        }
+    }
+
+    async fn move_task_to_column(
+        &self,
+        project_id: &Value,
+        task_id: &Value,
+        column_id: &Value,
+        swimlane_id: &Value,
+        position: i64,
+    ) -> Result<()> {
+        match self {
+            Self::Kanboard(client) => {
+                client
+                    .move_task_to_column(project_id, task_id, column_id, swimlane_id, position)
+                    .await
+            }
+            Self::Smartsheet(client) => {
+                client
+                    .move_task_to_column(project_id, task_id, column_id)
+                    .await
+            }
+            Self::Hybrid {
+                kanboard,
+                smartsheet,
+                ..
+            } => {
+                if self.is_smartsheet_project(project_id) {
+                    smartsheet
+                        .move_task_to_column(project_id, task_id, column_id)
+                        .await
+                } else {
+                    kanboard
+                        .move_task_to_column(project_id, task_id, column_id, swimlane_id, position)
+                        .await
+                }
+            }
+        }
+    }
+}
+
+impl Worker<BoardClient<KanboardClient>> {
+    /// Build a production worker that can route configured boards to Kanboard or Smartsheet.
     pub async fn from_config(config: AppConfig) -> Result<Self> {
-        let client = KanboardClient::new(
-            &config.server.url,
-            &config.server.user,
-            &config.server.token,
-        );
+        let has_smartsheet = config.boards.iter().any(BoardConfig::is_smartsheet);
+        let has_kanboard = config.boards.iter().any(|board| !board.is_smartsheet());
+        let kanboard = || {
+            KanboardClient::new(
+                &config.server.url,
+                &config.server.user,
+                &config.server.token,
+            )
+        };
+        let smartsheet = || {
+            SmartsheetClient::new(
+                config.smartsheet.as_ref(),
+                &config.server.user,
+                config.boards.clone(),
+            )
+        };
+        let client = match (has_kanboard, has_smartsheet) {
+            (true, true) => BoardClient::Hybrid {
+                kanboard: kanboard(),
+                smartsheet: smartsheet(),
+                boards: config.boards.clone(),
+            },
+            (false, true) => BoardClient::Smartsheet(smartsheet()),
+            _ => BoardClient::Kanboard(kanboard()),
+        };
         let user = client.get_me().await?;
         Ok(Self {
             config,
@@ -117,6 +538,14 @@ impl<C: KanboardApi> Worker<C> {
             user.get("id").unwrap_or(&Value::Null)
         )];
         for board in &self.config.boards {
+            if board.is_smartsheet() {
+                self.lookup_columns(board).await?;
+                lines.push(format!(
+                    "Smartsheet sheet {}: found configured columns",
+                    board.id
+                ));
+                continue;
+            }
             self.lookup_columns(board).await?;
             lines.push(format!("Board {}: found configured columns", board.id));
         }
@@ -232,6 +661,9 @@ impl<C: KanboardApi> Worker<C> {
     /// posts a progress comment on the parent card.
     pub async fn claim_next_subtask(&self) -> Result<Option<ClaimedTask>> {
         for board in &self.config.boards {
+            if board.is_smartsheet() {
+                continue;
+            }
             let lookup = self.lookup_columns(board).await?;
             for task in self.all_board_tasks(board).await? {
                 if let Some(subtask) = self
@@ -291,6 +723,9 @@ impl<C: KanboardApi> Worker<C> {
         for board in &self.config.boards {
             let lookup = self.lookup_columns(board).await?;
             let board_tasks = self.tasks_by_column(board).await?;
+            if board.is_smartsheet() {
+                continue;
+            }
             for task in assigned_tasks(
                 board_tasks
                     .get(&value_id(&lookup.working).to_string())
@@ -452,14 +887,23 @@ impl<C: KanboardApi> Worker<C> {
         }
     }
 
-    /// Move a claimed top-level task to a Kanboard column id.
+    /// Move a claimed top-level task to a board column id.
     async fn move_task_to_column(&self, claimed: &ClaimedTask, column_id: &Value) -> Result<()> {
+        let swimlane_id = if claimed.board.is_smartsheet() {
+            Value::from(0)
+        } else {
+            claimed
+                .task
+                .get("swimlane_id")
+                .cloned()
+                .unwrap_or_else(|| Value::from(0))
+        };
         self.client
             .move_task_to_column(
                 &claimed.board.id,
                 &value_id(&claimed.task),
                 column_id,
-                claimed.task.get("swimlane_id").unwrap_or(&Value::from(0)),
+                &swimlane_id,
                 1,
             )
             .await
@@ -632,11 +1076,14 @@ pub fn session_metadata_key(server_user: &str, subtask_id: Option<&Value>) -> St
     }
 }
 
-/// Filter task payloads to those assigned to a Kanboard username.
+/// Filter task payloads to those assigned to a board username.
 fn assigned_tasks(tasks: &[Value], username: &str) -> Vec<Value> {
     tasks
         .iter()
-        .filter(|task| value_str(task, "assignee_username") == username)
+        .filter(|task| {
+            let assignee = value_str(task, "assignee_username");
+            assignee == username || assignee.eq_ignore_ascii_case(username)
+        })
         .cloned()
         .collect()
 }
