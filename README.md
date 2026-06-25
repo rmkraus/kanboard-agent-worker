@@ -123,11 +123,16 @@ For built-in agents, `agent.name` selects the default ACP command:
 
 `agent.command` can override the ACP executable. For any other `agent.name`,
 `agent.command` is required and must point at an ACP-compatible process. ACP
-sessions receive a Kanboard MCP server by launching this same executable with
-the internal `mcp` subcommand. That server gives agents tools to list, download,
+sessions receive a board MCP server by launching this same executable with the
+internal `mcp` subcommand. That server gives agents tools to list, download,
 upload, and delete task attachments; post task comments for links and
-coordination notes; create subtasks; and move cards to the configured `todo`,
-`working`, `blocked`, or `done` columns.
+coordination notes; create subtasks where supported; and move cards/rows to the
+configured `todo`, `working`, `blocked`, or `done` columns.
+
+The worker does not advertise ACP file-system or terminal client capabilities.
+Repository file edits, reads, and shell commands are handled by the launched
+agent's native utilities. `agent.pwd` is still passed as the ACP session root and
+as `KANBOARD_AGENT_PWD` for the board MCP attachment file boundary.
 
 All agents receive the same rendered prompt template. It includes the worker
 username, card fields, task metadata, the visible Kanboard comment conversation,
@@ -220,10 +225,11 @@ returns the parent card to the configured todo/ready column.
 6. Move claimed whole tasks to the working column.
 7. Build one agent prompt from card metadata, conversation, worker identity, task
    description, and system prompt.
-8. Run the selected ACP agent from `agent.pwd`.
+8. Run the selected ACP agent from `agent.pwd`; the agent uses its native file
+   and terminal utilities for repository work.
 9. Save the ACP session id in Kanboard task metadata.
-10. Give ACP agents Kanboard tools for attachments, subtasks, and configured
-    column moves.
+10. Give ACP agents board tools for attachments, subtasks where supported, and
+    configured column/status moves.
 11. Post the final response to Kanboard comments.
 12. Move successful whole-task work to done unless the agent already moved the
     card. If the card has pending subtasks, return it to the todo/ready column.
